@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: custom-mig-parted-config
+  namespace: gpu-operator
+data:
+  config.yaml: |
+    version: v1
+    mig-configs:
+      profile-0-0-0-0-1:
+        - devices: [0]
+          mig-enabled: true
+          mig-devices:
+            "7g.40gb": 1
+        - devices: [1,2,3]
+          mig-enabled: false
+      profile-3-0-0-1-0:
+        - devices: [0]
+          mig-enabled: true
+          mig-devices:
+            "1g.5gb": 3
+            "4g.20gb": 1
+        - devices: [1,2,3]
+          mig-enabled: false
+      profile-7-0-0-0-0:
+        - devices: [0]
+          mig-enabled: true
+          mig-devices:
+            "1g.5gb": 7
+        - devices: [1,2,3]
+          mig-enabled: false
