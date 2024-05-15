@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mnist-train
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mnist-train
+  template:
+    metadata:
+      labels:
+        app: mnist-train
+    spec:
+      restartPolicy: Always
+      containers:
+      - name: mnist-train
+        image: irenetht/mnist:train # mnist:train
+        command: ['sh', '-c', 'python3 main.py --epoch 1000']
+        resources:
+          requests:
+            nvidia.com/mig-2g.10gb: "1"
+          limits:
+            nvidia.com/mig-2g.10gb: "1"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mnist-train2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mnist-train2
+  template:
+    metadata:
+      labels:
+        app: mnist-train2
+    spec:
+      restartPolicy: Always
+      containers:
+      - name: mnist-train2
+        image: irenetht/mnist:train # mnist:train
+        command: ['sh', '-c', 'python3 main.py --epoch 1000']
+        resources:
+          requests:
+            nvidia.com/mig-2g.10gb: "1"
+          limits:
+            nvidia.com/mig-2g.10gb: "1"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mnist-train3
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mnist-train3
+  template:
+    metadata:
+      labels:
+        app: mnist-train3
+    spec:
+      restartPolicy: Always
+      containers:
+      - name: mnist-train3
+        image: irenetht/mnist:train # mnist:train
+        command: ['sh', '-c', 'python3 main.py --epoch 1000']
+        resources:
+          requests:
+            nvidia.com/mig-2g.10gb: "1"
+          limits:
+            nvidia.com/mig-2g.10gb: "1"

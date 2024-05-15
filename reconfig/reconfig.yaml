@@ -12,7 +12,13 @@ spec:
     volumeMounts:
     - name: mig-config-volume
       mountPath: /etc/config
+    - name: device-plugin
+      mountPath: /var/lib/kubelet/pod-resources/kubelet.sock
   volumes:
     - name: mig-config-volume
       configMap:
         name: custom-mig-parted-config
+    - name: device-plugin
+      hostPath:
+        path: /var/lib/kubelet/pod-resources/kubelet.sock
+      
