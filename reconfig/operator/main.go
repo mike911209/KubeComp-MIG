@@ -25,18 +25,18 @@ import (
 	"path/filepath"
 	"net/url"
 
+	nvmlclient "reconfig/pkg/client"
 	"gopkg.in/yaml.v2"
 )
 
 const (
 	targetPodLabel			string = "targetPod"
 	targetNamespaceLabel	string = "targetNamespace"
-	podRestart				string = "restart"
 	kubecompStatus			string = "kubecomp.com/reconfig.state"
 	nvConfigLabel			string = "nvidia.com/mig.config"
 	nvMigStateLabel			string = "nvidia.com/mig.config.state"
 	migConfigPath			string = "/etc/config/config.yaml"
-	gpuResources			string = "nvidia.com/"
+	migResources			string = "nvidia.com/mig"
 )
 
 type MigConfig struct {
@@ -48,6 +48,11 @@ type MigConfig struct {
 type MigConfigYaml struct {
 	Version     string `yaml:"version"`
 	MigConfigs  map[string][]MigConfig `yaml:"mig-configs"`
+}
+
+type Pod struct {
+	name string
+	namespace string
 }
 
 type LabelsChangedPredicate struct {
@@ -107,8 +112,8 @@ func main() {
 			builder.WithPredicates(
 				LabelsChangedPredicate{},
 			),
-		).       
-		Complete(&ReconfigReconciler{Client: manager.GetClient(), Scheme: manager.GetScheme(), ClientSet: clientSet, Lister: lister,})
+		). 
+		Complete(&ReconfigReconciler{Client: manager.GetClient(), Scheme: manager.GetScheme(), ClientSet: clientSet, Lister: lister, nvmlClient: nvmlclient.NewClient()})
 
 	if err != nil {
 		log.Fatal(err, "could not create controller")
@@ -124,6 +129,7 @@ type ReconfigReconciler struct {
 	Scheme *runtime.Scheme
 	ClientSet *kubernetes.Clientset
 	Lister pdrv1.PodResourcesListerClient
+	nvmlClient	nvmlclient.ClientImpl
 }
 
 func (r *ReconfigReconciler) extractUsedGPU(nodeName string) (map[string]int64, []corev1.Pod) {
@@ -146,7 +152,7 @@ func (r *ReconfigReconciler) extractUsedGPU(nodeName string) (map[string]int64, 
 		addToGpuPods := false
 		for _, c := range pod.Spec.Containers {
 			for sliceName, sliceCnts := range c.Resources.Requests {
-				if strings.HasPrefix(string(sliceName), gpuResources) {
+				if strings.HasPrefix(string(sliceName), migResources) {
 					num, _ := sliceCnts.AsInt64()
 					migSliceCnts[string(sliceName)] += num
 					if !addToGpuPods {
@@ -160,7 +166,7 @@ func (r *ReconfigReconciler) extractUsedGPU(nodeName string) (map[string]int64, 
 	return migSliceCnts, gpuPods
 }
 
-func (r *ReconfigReconciler) getConfig(requestMigSlices map[string]int64) (string, error) {
+func (r *ReconfigReconciler) getValidConfig(requestMigSlices map[string]int64) (string, error) {
 	configFile, err := ioutil.ReadFile(migConfigPath)
 
 	if err != nil {
@@ -196,20 +202,65 @@ func (r *ReconfigReconciler) getConfig(requestMigSlices map[string]int64) (strin
 	return "", fmt.Errorf("Config not found.")
 }
 
-func (r *ReconfigReconciler) stopPods(stopPods []corev1.Pod) {
-	for _, pod := range stopPods {
-		err := r.ClientSet.CoreV1().Pods(pod.Namespace).Delete(context.Background(), pod.Name, metav1.DeleteOptions{})
-		if err != nil {
-			log.Printf("Error deleting pod %s: %v", pod.Name, err)
+func (r *ReconfigReconciler) getConfig(configName string) map[int]map[string]int {
+	config := make(map[int]map[string]int)
+	configFile, err := ioutil.ReadFile(migConfigPath)
+
+	if err != nil {
+		log.Fatalf("Error reading mig config file: %v", err)
+	}	
+
+	var migConfigYaml MigConfigYaml
+	err = yaml.Unmarshal(configFile, &migConfigYaml)
+	if err != nil {
+		log.Fatalf("Error unmarshaling YAML: %v", err)
+	}
+
+	for profileName, migConfig := range migConfigYaml.MigConfigs {
+		if profileName == configName {
+			for _, deviceConfig := range migConfig {
+				for _, d := range deviceConfig.Devices {
+					config[d] = deviceConfig.MigDevices
+				}
+			}
 		}
-		log.Printf("Delete pod %s in namespace %s\n", pod.Name, pod.Namespace)
+	}
+	log.Printf("%s config: %v\n", configName, config)
+	return config
+}
+
+func (r *ReconfigReconciler) getReconfigGPU(oldConfig string, newConfig string) []int {
+	oldMigConfig := r.getConfig(oldConfig)
+	newMigConfig := r.getConfig(newConfig)
+	var gpuIDs []int
+
+	for id, config := range newMigConfig {
+		for key, val := range config {
+			if val != oldMigConfig[id][key] {
+				gpuIDs = append(gpuIDs, id)
+				break
+			}
+		}
+	}
+
+	log.Printf("GPU %v will be reconfigured.\n", gpuIDs)
+	return gpuIDs
+}
+
+func (r *ReconfigReconciler) stopPods(stopPods []Pod) {
+	for _, pod := range stopPods {
+		err := r.ClientSet.CoreV1().Pods(pod.namespace).Delete(context.Background(), pod.name, metav1.DeleteOptions{})
+		if err != nil {
+			log.Printf("Error deleting pod %s: %v", pod.name, err)
+		}
+		log.Printf("Delete pod %s in namespace %s\n", pod.name, pod.namespace)
 	}
 
 	// make sure the pods are successfully deleted
 	for {
 		deletedCnt := 0
 		for _, pod := range stopPods {
-			_, err := r.ClientSet.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+			_, err := r.ClientSet.CoreV1().Pods(pod.namespace).Get(context.Background(), pod.name, metav1.GetOptions{})
 			if err != nil {
 				deletedCnt += 1
 			}
@@ -220,11 +271,6 @@ func (r *ReconfigReconciler) stopPods(stopPods []corev1.Pod) {
 	}
 }
 
-const (
-	StatusUsed    Status = "used"
-	StatusFree    Status = "free"
-	StatusUnknown Status = "unknown"
-)
 type Status string
 type Device struct {
 	// ResourceName is the name of the resource exposed to k8s
@@ -237,30 +283,43 @@ type Device struct {
 	Status Status
 }
 
-func (r *ReconfigReconciler) GetUsedDevices(ctx context.Context) ([]Device, error) {
-	// List Pods Resources
+func (r *ReconfigReconciler) GetPodLocation(ctx context.Context) (map[int][]Pod, error) {
+	podLocation := make(map[int][]Pod)
+
 	listResp, err := r.Lister.List(ctx, &pdrv1.ListPodResourcesRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("unable to list resources used by running Pods from Kubelet gRPC socket: %s", err)
 	}
-	// Convert resp to devices
-	result := make([]Device, 0)
-	for _, r := range listResp.PodResources {
-		for _, cr := range r.Containers {
+
+	for _, pr := range listResp.PodResources {
+		pod := Pod{
+			name: pr.Name,
+			namespace: pr.Namespace,
+		}
+		for _, cr := range pr.Containers {
 			for _, cd := range cr.GetDevices() {
 				for _, cdId := range cd.DeviceIds {
-					device := Device{
-						ResourceName: corev1.ResourceName(cd.GetResourceName()),
-						DeviceId:     cdId,
-						Status:       StatusUsed,
+					gpu, err := r.nvmlClient.GetMigDeviceGpuIndex(cdId)
+					if err != nil {
+						fmt.Printf("error when GetMigDeviceGpuIndex: %v\n", err)
 					}
-					result = append(result, device)
+					podLocation[gpu] = append(podLocation[gpu], pod)
 				}
 			}
 		}
 	}
 
-	return result, nil
+	return podLocation, nil
+}
+
+func (r *ReconfigReconciler) isResponsible(n *corev1.Node) bool{
+	podName := os.Getenv("POD_NAME")
+    podNamespace := os.Getenv("POD_NAMESPACE")
+	pod, err := r.ClientSet.CoreV1().Pods(podNamespace).Get(context.TODO(), podName, metav1.GetOptions{})
+	if err != nil {
+		log.Printf("error getting reconfig pod scheduled node: %v\n", err)
+	}
+	return pod.Spec.NodeName == n.Name;
 }
 
 func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -268,6 +327,10 @@ func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	err := r.Get(ctx, req.NamespacedName, node)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	if (!r.isResponsible(node)) {
+		return ctrl.Result{}, nil
 	}
 
 	// identify the target pod
@@ -285,17 +348,8 @@ func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// reconfig starts
 	log.Printf("Reconfig for pod %s in namespace %s\n", targetPodName, targetNamespace)
-	
-	// print out the used devices
-	used, err := r.GetUsedDevices(ctx)
-	if err != nil {
-		log.Printf("error getting used device: %v\n", err)
-		return ctrl.Result{}, nil
-	}
-	log.Printf("used devices: %v\n", used)
 
-	// adding label and taint for nodes
-	node.Labels[kubecompStatus] = "pending"
+	// adding taint for nodes
 	taint := &corev1.Taint{
         Key:    kubecompStatus,
         Value:  "pending",
@@ -305,12 +359,45 @@ func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	
 	err = r.Update(ctx, node)
 	if err != nil {
-		log.Printf("Error when adding label and taint to the node: %v", err)
+		log.Printf("Error when adding taint to the node: %v", err)
 	}
 
+	/* test begin
+	// delete the pod
+	err = r.ClientSet.CoreV1().Pods(targetNamespace).Delete(context.Background(), targetPodName, metav1.DeleteOptions{})
+	if err != nil {
+		log.Printf("Error deleting pod: %v\n", err)
+	}
+	log.Printf("Delete pod %s in namespace %s\n", targetPodName, targetNamespace)
+	// expect the deployment creates the pod but it cannot be scheduled
+	time.Sleep(3 * time.Second)
+	// try to edit the pod
+	deployment, err := r.ClientSet.AppsV1().Deployments(targetNamespace).Get(context.TODO(), "mnist-train", metav1.GetOptions{})
+	if err != nil {
+		log.Printf("Error getting deployment: %v\n", err)
+	}
+	labelSelector := metav1.FormatLabelSelector(deployment.Spec.Selector)
+	pods, err := r.ClientSet.CoreV1().Pods(targetNamespace).List(context.TODO(), metav1.ListOptions{
+        LabelSelector: labelSelector,
+    })
+	if err != nil {
+		log.Printf("Error listing pods: %v\n", err)
+	}
+	
+	for _, pod := range pods.Items {
+    	// Update the pod's labels
+		pod.Labels["updated"] = "true"
+		// Update the pod
+		_, err = r.ClientSet.CoreV1().Pods(targetNamespace).Update(context.TODO(), &pod, metav1.UpdateOptions{})
+		if err != nil {
+			log.Printf("Error updating pods: %v\n", err)
+		}
+	}
+	*/ 
+
+	
 	defer func() {
 		err := r.Get(ctx, req.NamespacedName, node)
-		node.Labels[kubecompStatus] = "done"
 		var updatedTaints []corev1.Taint
 		for _, taint := range node.Spec.Taints {
 			if taint.Key != kubecompStatus {
@@ -326,13 +413,21 @@ func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		log.Printf("Leave reconcile.\n")
 	}()
 
+	// get the pod gpu location
+	podLocation, err := r.GetPodLocation(ctx)
+	if err != nil {
+		log.Printf("error getting used device: %v\n", err)
+		return ctrl.Result{}, nil
+	}
+	log.Printf("podLocation: %v\n", podLocation)
+
 	// calculate the required resource
-	usedSliceCnts, gpuPods := r.extractUsedGPU(node.Name)
+	usedSliceCnts, _ := r.extractUsedGPU(node.Name)
 
 	// add the request of the target pod to the usedSliceCnts
 	for _, c := range targetPod.Spec.Containers {
 		for sliceName, sliceCnts := range c.Resources.Requests {
-			if strings.HasPrefix(string(sliceName), gpuResources) {
+			if strings.HasPrefix(string(sliceName), migResources) {
 				num, _ := sliceCnts.AsInt64()
 				usedSliceCnts[string(sliceName)] += num
 			}
@@ -341,15 +436,20 @@ func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// check which config can handle the request
 	log.Printf("Request Slices: %v\n", usedSliceCnts)
-	updateConfig, err := r.getConfig(usedSliceCnts)
+	updateConfig, err := r.getValidConfig(usedSliceCnts)
 	if err != nil {
 		log.Printf("Fail to get config: %v\n", err)
 		return ctrl.Result{}, err
 	}
 	
-	log.Printf("Reconfig for %s. Stop the pods...\n", updateConfig)
-	gpuPods = append(gpuPods, *targetPod)
-	r.stopPods(gpuPods)
+	gpuIDs := r.getReconfigGPU(node.Labels[nvConfigLabel], updateConfig)
+	var stopPods []Pod
+	for _, id := range gpuIDs {
+        stopPods = append(stopPods, podLocation[id]...)
+    }
+	stopPods = append(stopPods, Pod{name: targetPodName, namespace: targetNamespace})
+	log.Printf("Reconfig for %s. Stop the pods %v\n", updateConfig, stopPods)
+	r.stopPods(stopPods)
 	
 	// update label for gpu operator
 	err = r.Get(ctx, req.NamespacedName, node)
@@ -368,6 +468,6 @@ func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 	}
 	log.Printf("GPU operator is done.\n")
-	
+
 	return ctrl.Result{}, nil
 }
