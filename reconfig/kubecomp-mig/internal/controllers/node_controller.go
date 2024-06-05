@@ -1,59 +1,30 @@
-package main
+package controllers
 
 import (
 	"context"
-	"os"
 	"io/ioutil"
 	"log"
 	"strings"
 	"time"
 	"fmt"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	// "sigs.k8s.io/controller-runtime/pkg/log/zap"
 	corev1 "k8s.io/api/core/v1"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
+	// "sigs.k8s.io/controller-runtime/pkg/builder"
 	"github.com/google/go-cmp/cmp"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/apimachinery/pkg/runtime"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	pdrv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
-	"k8s.io/kubernetes/pkg/kubelet/apis/podresources"
-	"path/filepath"
-	"net/url"
+	// "k8s.io/kubernetes/pkg/kubelet/apis/podresources"
 
-	nvmlclient "reconfig/pkg/client"
+	nvmlclient "kubecomp-mig/pkg/gpu"
 	"gopkg.in/yaml.v2"
 )
-
-const (
-	targetPodLabel			string = "targetPod"
-	targetNamespaceLabel	string = "targetNamespace"
-	kubecompStatus			string = "kubecomp.com/reconfig.state"
-	nvConfigLabel			string = "nvidia.com/mig.config"
-	nvMigStateLabel			string = "nvidia.com/mig.config.state"
-	migConfigPath			string = "/etc/config/config.yaml"
-	migResources			string = "nvidia.com/mig"
-)
-
-type MigConfig struct {
-	Devices    []int            `yaml:"devices"`
-	MigEnabled bool             `yaml:"mig-enabled"`
-	MigDevices map[string]int   `yaml:"mig-devices"`
-}
-
-type MigConfigYaml struct {
-	Version     string `yaml:"version"`
-	MigConfigs  map[string][]MigConfig `yaml:"mig-configs"`
-}
-
-type Pod struct {
-	name string
-	namespace string
-}
 
 type LabelsChangedPredicate struct {
 	predicate.Funcs
@@ -64,72 +35,13 @@ func (p LabelsChangedPredicate) Update(updateEvent event.UpdateEvent) bool {
 			!cmp.Equal(updateEvent.ObjectOld.GetLabels()[targetNamespaceLabel], updateEvent.ObjectNew.GetLabels()[targetNamespaceLabel]) 
 }
 
-func LocalEndpoint(path, file string) (string, error) {
-	u := url.URL{
-		Scheme: "unix",
-		Path:   path,
-	}
-	return filepath.Join(u.String(), file+".sock"), nil
-}
-
-func initListerClient() (pdrv1.PodResourcesListerClient, error) {
-	u := url.URL{
-		Scheme: "unix",
-		Path:   "/var/lib/kubelet/pod-resources",
-	}
-	endpoint := filepath.Join(u.String(), podresources.Socket+".sock")
-	listerClient, _, err := podresources.GetV1Client(endpoint, 10 * time.Second, 1024 * 1024 * 16)
-	return listerClient, err
-}
-
-func main() {
-	opts := zap.Options{}
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
-
-	cfg := ctrl.GetConfigOrDie()
-	clientSet, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		log.Fatal("unable to create clientset")
-	}
-
-	manager, err := ctrl.NewManager(cfg, ctrl.Options{})
-	if err != nil {
-		log.Fatal(err, "could not create manager")
-		os.Exit(1)
-	}
-
-	lister, err := initListerClient()
-	if err != nil {
-		log.Fatal(err, "could not create lister")
-		os.Exit(1)
-	}
-
-	// create the Controller
-	err = ctrl.
-		NewControllerManagedBy(manager). 
-		For(
-			&corev1.Node{},
-			builder.WithPredicates(
-				LabelsChangedPredicate{},
-			),
-		). 
-		Complete(&ReconfigReconciler{Client: manager.GetClient(), Scheme: manager.GetScheme(), ClientSet: clientSet, Lister: lister, nvmlClient: nvmlclient.NewClient()})
-
-	if err != nil {
-		log.Fatal(err, "could not create controller")
-	}
-
-	if err := manager.Start(ctrl.SetupSignalHandler()); err != nil {
-		log.Fatal(err, "could not start manager")
-	}
-}
-
 type ReconfigReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	ClientSet *kubernetes.Clientset
-	Lister pdrv1.PodResourcesListerClient
-	nvmlClient	nvmlclient.ClientImpl
+	Scheme 				*runtime.Scheme
+	ClientSet 			*kubernetes.Clientset
+	Lister 				pdrv1.PodResourcesListerClient
+	NvmlClient			nvmlclient.ClientImpl
+	ResponsibleNode 	string
 }
 
 func (r *ReconfigReconciler) extractUsedGPU(nodeName string) (map[string]int64, []corev1.Pod) {
@@ -271,18 +183,6 @@ func (r *ReconfigReconciler) stopPods(stopPods []Pod) {
 	}
 }
 
-type Status string
-type Device struct {
-	// ResourceName is the name of the resource exposed to k8s
-	// (e.g. nvidia.com/gpu, nvidia.com/mig-2g10gb, etc.)
-	ResourceName corev1.ResourceName
-	// DeviceId is the actual ID of the underlying device
-	// (e.g. ID of the GPU, ID of the MIG device, etc.)
-	DeviceId string
-	// Status represents the status of the k8s resource (e.g. free or used)
-	Status Status
-}
-
 func (r *ReconfigReconciler) GetPodLocation(ctx context.Context) (map[int][]Pod, error) {
 	podLocation := make(map[int][]Pod)
 
@@ -299,7 +199,7 @@ func (r *ReconfigReconciler) GetPodLocation(ctx context.Context) (map[int][]Pod,
 		for _, cr := range pr.Containers {
 			for _, cd := range cr.GetDevices() {
 				for _, cdId := range cd.DeviceIds {
-					gpu, err := r.nvmlClient.GetMigDeviceGpuIndex(cdId)
+					gpu, err := r.NvmlClient.GetMigDeviceGpuIndex(cdId)
 					if err != nil {
 						fmt.Printf("error when GetMigDeviceGpuIndex: %v\n", err)
 					}
@@ -312,16 +212,6 @@ func (r *ReconfigReconciler) GetPodLocation(ctx context.Context) (map[int][]Pod,
 	return podLocation, nil
 }
 
-func (r *ReconfigReconciler) isResponsible(n *corev1.Node) bool{
-	podName := os.Getenv("POD_NAME")
-    podNamespace := os.Getenv("POD_NAMESPACE")
-	pod, err := r.ClientSet.CoreV1().Pods(podNamespace).Get(context.TODO(), podName, metav1.GetOptions{})
-	if err != nil {
-		log.Printf("error getting reconfig pod scheduled node: %v\n", err)
-	}
-	return pod.Spec.NodeName == n.Name;
-}
-
 func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	node := &corev1.Node{}
 	err := r.Get(ctx, req.NamespacedName, node)
@@ -329,7 +219,7 @@ func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
-	if (!r.isResponsible(node)) {
+	if (node.Name != r.ResponsibleNode) {
 		return ctrl.Result{}, nil
 	}
 
@@ -347,7 +237,7 @@ func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// reconfig starts
-	log.Printf("Reconfig for pod %s in namespace %s\n", targetPodName, targetNamespace)
+	log.Printf("Reconfig for pod %s in namespace %s on Node %s\n", targetPodName, targetNamespace, r.ResponsibleNode)
 
 	// adding taint for nodes
 	taint := &corev1.Taint{
@@ -362,40 +252,6 @@ func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		log.Printf("Error when adding taint to the node: %v", err)
 	}
 
-	/* test begin
-	// delete the pod
-	err = r.ClientSet.CoreV1().Pods(targetNamespace).Delete(context.Background(), targetPodName, metav1.DeleteOptions{})
-	if err != nil {
-		log.Printf("Error deleting pod: %v\n", err)
-	}
-	log.Printf("Delete pod %s in namespace %s\n", targetPodName, targetNamespace)
-	// expect the deployment creates the pod but it cannot be scheduled
-	time.Sleep(3 * time.Second)
-	// try to edit the pod
-	deployment, err := r.ClientSet.AppsV1().Deployments(targetNamespace).Get(context.TODO(), "mnist-train", metav1.GetOptions{})
-	if err != nil {
-		log.Printf("Error getting deployment: %v\n", err)
-	}
-	labelSelector := metav1.FormatLabelSelector(deployment.Spec.Selector)
-	pods, err := r.ClientSet.CoreV1().Pods(targetNamespace).List(context.TODO(), metav1.ListOptions{
-        LabelSelector: labelSelector,
-    })
-	if err != nil {
-		log.Printf("Error listing pods: %v\n", err)
-	}
-	
-	for _, pod := range pods.Items {
-    	// Update the pod's labels
-		pod.Labels["updated"] = "true"
-		// Update the pod
-		_, err = r.ClientSet.CoreV1().Pods(targetNamespace).Update(context.TODO(), &pod, metav1.UpdateOptions{})
-		if err != nil {
-			log.Printf("Error updating pods: %v\n", err)
-		}
-	}
-	*/ 
-
-	
 	defer func() {
 		err := r.Get(ctx, req.NamespacedName, node)
 		var updatedTaints []corev1.Taint
