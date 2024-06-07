@@ -1,9 +1,10 @@
 apiVersion: apps/v1
-kind: DaemonSet
+kind: Deployment
 metadata:
   name: reconfig
   namespace: gpu-operator
 spec:
+  replicas: 1
   selector:
     matchLabels:
       name: reconfig
@@ -19,21 +20,8 @@ spec:
         volumeMounts:
         - name: mig-config-volume
           mountPath: /etc/config
-        - name: device-plugin
-          mountPath: /var/lib/kubelet/pod-resources/kubelet.sock
-        env:
-        - name: POD_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-        - name: POD_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
       volumes:
         - name: mig-config-volume
           configMap:
             name: custom-mig-parted-config
-        - name: device-plugin
-          hostPath:
-            path: /var/lib/kubelet/pod-resources/kubelet.sock
+       

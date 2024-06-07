@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: reporter
+  namespace: gpu-operator
+spec:
+  selector:
+    matchLabels:
+      name: reporter
+  template:
+    metadata:
+      labels:
+        name: reporter
+    spec:
+      serviceAccountName: kubecomp
+      containers:
+      - name: reporter
+        image: "gpu-reporter:local"
+        volumeMounts:
+        - name: device-plugin
+          mountPath: /var/lib/kubelet/pod-resources/kubelet.sock
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/pod-resources/kubelet.sock

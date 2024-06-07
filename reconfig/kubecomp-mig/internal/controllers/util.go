@@ -1,9 +1,9 @@
 package controllers
 
 import (
+	"errors"
 	corev1 "k8s.io/api/core/v1"
-	"net/url"
-	"path/filepath"
+	appsv1 "k8s.io/api/apps/v1"
 )
 
 const (
@@ -12,8 +12,11 @@ const (
 	kubecompStatus			string = "kubecomp.com/reconfig.state"
 	nvConfigLabel			string = "nvidia.com/mig.config"
 	nvMigStateLabel			string = "nvidia.com/mig.config.state"
+	preprocessLabel			string = "preprocess"
 	migConfigPath			string = "/etc/config/config.yaml"
 	migResources			string = "nvidia.com/mig"
+	podTemplateHash			string = "pod-template-hash"
+	gpuIDLabel 				string = "gpuIDs"
 )
 
 type MigConfig struct {
@@ -28,8 +31,8 @@ type MigConfigYaml struct {
 }
 
 type Pod struct {
-	name string
-	namespace string
+	name 			string
+	namespace 		string
 }
 
 type Status string
@@ -45,10 +48,42 @@ type Device struct {
 	Status Status
 }
 
-func LocalEndpoint(path, file string) (string, error) {
-	u := url.URL{
-		Scheme: "unix",
-		Path:   path,
-	}
-	return filepath.Join(u.String(), file+".sock"), nil
+type KeyToQueue struct {
+	lookup map[string][]string
 }
+
+func (k *KeyToQueue) Add(key string, value string) {
+	if k.lookup == nil {
+		k.lookup = make(map[string][]string)
+	}
+	k.lookup[key] = append(k.lookup[key], value)
+}
+
+func (k *KeyToQueue) GetFirstVal(key string) (string, error) {
+	if values, exists := k.lookup[key]; exists && len(values) > 0 {
+		return values[0], nil
+	}
+	return "", errors.New("Not found.")
+}
+
+func (k *KeyToQueue) DeleteFirstVal(key string) error {
+	if values, exists := k.lookup[key]; exists && len(values) > 0 {
+		k.lookup[key] = values[1:]
+		if len(k.lookup[key]) == 0 {
+			delete(k.lookup, key)
+		}
+		return nil
+	}
+	return errors.New("Not found.")
+}
+
+func isOwnedByDaemonSet(pod *corev1.Pod, daemonset *appsv1.DaemonSet) bool {
+    for _, ownerRef := range pod.OwnerReferences {
+        if ownerRef.Kind == "DaemonSet" && ownerRef.Name == daemonset.Name {
+            return true
+        }
+    }
+    return false
+}
+
+var NodeAffinityLookup KeyToQueue
