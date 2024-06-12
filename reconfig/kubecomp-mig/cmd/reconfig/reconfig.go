@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io/ioutil"
 	"os"
 	"log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -10,6 +11,11 @@ import (
 
 	nvmlclient "kubecomp-mig/pkg/gpu"
 	"kubecomp-mig/internal/controllers"
+	"gopkg.in/yaml.v2"
+)
+
+const (
+	migConfigPath			string = "/etc/config/config.yaml"
 )
 
 func main() {
@@ -28,12 +34,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	// read mig-parted-config
+	var migPartedConfig controllers.MigConfigYaml
+	migConfigFile, err := ioutil.ReadFile(migConfigPath)
+	if err != nil {
+		log.Fatalf("Error reading mig config file: %v", err)
+	}	
+	err = yaml.Unmarshal(migConfigFile, &migPartedConfig)
+	if err != nil {
+		log.Fatalf("Error unmarshal mig config file: %v", err)
+	}	
+
 	// create the Controller
 	ReconfigReconciler := controllers.ReconfigReconciler{
 		Client: manager.GetClient(), 
 		Scheme: manager.GetScheme(), 
 		ClientSet: clientSet, 
 		NvmlClient: nvmlclient.NewClient(), 
+		MigPartedConfig: migPartedConfig,
 	}
 	ReconfigReconciler.SetupWithManager(manager) 
 	if err != nil {

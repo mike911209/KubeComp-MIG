@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"context"
-	"io/ioutil"
 	"log"
 	"strings"
 	"strconv"
@@ -21,7 +20,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	nvmlclient "kubecomp-mig/pkg/gpu"
-	"gopkg.in/yaml.v2"
 )
 
 type LabelsChangedPredicate struct {
@@ -38,6 +36,7 @@ type ReconfigReconciler struct {
 	Scheme 				*runtime.Scheme
 	ClientSet 			*kubernetes.Clientset
 	NvmlClient			nvmlclient.ClientImpl
+	MigPartedConfig		MigConfigYaml
 }
 
 func (r *ReconfigReconciler) extractUsedGPU(nodeName string) (map[string]int64, []corev1.Pod) {
@@ -74,57 +73,9 @@ func (r *ReconfigReconciler) extractUsedGPU(nodeName string) (map[string]int64, 
 	return migSliceCnts, gpuPods
 }
 
-func (r *ReconfigReconciler) getValidConfig(requestMigSlices map[string]int64) (string, error) {
-	configFile, err := ioutil.ReadFile(migConfigPath)
-
-	if err != nil {
-		log.Fatalf("Error reading mig config file: %v", err)
-	}	
-
-	var migConfigYaml MigConfigYaml
-	err = yaml.Unmarshal(configFile, &migConfigYaml)
-	if err != nil {
-		log.Fatalf("Error unmarshaling YAML: %v", err)
-	}
-
-	for profileName, migConfig := range migConfigYaml.MigConfigs {
-		find := true
-		log.Printf("Check profile %s\n", profileName)
-		for requestMigSlice, requestMigCnt := range requestMigSlices {
-			cnt := int64(0)
-			for _, deviceConfig := range migConfig {
-				removeString := "nvidia.com/mig-"
-				sliceName := requestMigSlice[len(removeString):]
-				cnt += int64(deviceConfig.MigDevices[sliceName] * len(deviceConfig.Devices))
-			}
-			log.Printf("%s: %d\n", requestMigSlice, cnt)
-			if cnt < requestMigCnt {
-				find = false
-				break
-			}
-		}
-		if find {
-			return profileName, nil
-		}
-	}
-	return "", fmt.Errorf("Config not found.")
-}
-
 func (r *ReconfigReconciler) getConfig(configName string) map[int]map[string]int {
 	config := make(map[int]map[string]int)
-	configFile, err := ioutil.ReadFile(migConfigPath)
-
-	if err != nil {
-		log.Fatalf("Error reading mig config file: %v", err)
-	}	
-
-	var migConfigYaml MigConfigYaml
-	err = yaml.Unmarshal(configFile, &migConfigYaml)
-	if err != nil {
-		log.Fatalf("Error unmarshaling YAML: %v", err)
-	}
-
-	for profileName, migConfig := range migConfigYaml.MigConfigs {
+	for profileName, migConfig := range r.MigPartedConfig.MigConfigs {
 		if profileName == configName {
 			for _, deviceConfig := range migConfig {
 				for _, d := range deviceConfig.Devices {
@@ -150,8 +101,6 @@ func (r *ReconfigReconciler) getReconfigGPU(oldConfig string, newConfig string) 
 			}
 		}
 	}
-
-	log.Printf("GPU %v will be reconfigured.\n", gpuIDs)
 	return gpuIDs
 }
 
@@ -217,7 +166,7 @@ func (r *ReconfigReconciler) stopGPUReporter(nodeName string) {
 }
 
 func (r *ReconfigReconciler) GetPodLocation(nodeName string) (map[int][]Pod, error) {
-	podLocation := make(map[int][]Pod)
+	podLocation := make(map[int][]Pod) // key: gpu id, value: list of pods
 	pods, err := r.ClientSet.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
         FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
     })
@@ -291,7 +240,7 @@ func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		log.Printf("Leave reconcile.\n")
 	}()
 
-	// get the pod gpu location
+	// get the pod gpu location (map gpu id to a list of pods)
 	podLocation, err := r.GetPodLocation(node.Name)
 	if err != nil {
 		log.Printf("error getting used device: %v\n", err)
@@ -300,13 +249,16 @@ func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	log.Printf("podLocation: %v\n", podLocation)
 
 	// calculate the required resource
-	usedSliceCnts, _ := r.extractUsedGPU(node.Name)
+	usedSliceCnts, _ := r.extractUsedGPU(node.Name) // for example: map[nvidia.com/mig-2g.10gb:3]
 
 	// add the request of the target pod to the usedSliceCnts
 	for _, c := range targetPod.Spec.Containers {
 		for sliceName, sliceCnts := range c.Resources.Requests {
 			if strings.HasPrefix(string(sliceName), migResources) {
 				num, _ := sliceCnts.AsInt64()
+				if _, ok := usedSliceCnts[string(sliceName)]; !ok {
+					usedSliceCnts[string(sliceName)] = 0
+				}
 				usedSliceCnts[string(sliceName)] += num
 			}
 		}
@@ -314,13 +266,15 @@ func (r *ReconfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// check which config can handle the request
 	log.Printf("Request Slices: %v\n", usedSliceCnts)
-	updateConfig, err := r.getValidConfig(usedSliceCnts)
+	updateConfig, err := r.getBestConfig(usedSliceCnts, podLocation, node.Labels[nvConfigLabel])
 	if err != nil {
 		log.Printf("Fail to get config: %v\n", err)
 		return ctrl.Result{}, err
 	}
 	
 	gpuIDs := r.getReconfigGPU(node.Labels[nvConfigLabel], updateConfig)
+	log.Printf("GPU %v will be reconfigured.\n", gpuIDs)
+	
 	var stopPods []Pod
 	for _, id := range gpuIDs {
         stopPods = append(stopPods, podLocation[id]...)

@@ -51,7 +51,6 @@ func (p *PodPreprocessReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 					NodeAffinityLookup.DeleteFirstVal(templateHash)
 					break
 				}
-				log.Printf("Error: %v", err)
 				if errors.IsConflict(err) {
 					if retryCount < maxRetries {
 						retryCount++
