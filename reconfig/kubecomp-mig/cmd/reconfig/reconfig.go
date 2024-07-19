@@ -60,7 +60,13 @@ func main() {
 
 	podPreprocessReconciler := controllers.PodPreprocessReconciler{
 		Client: manager.GetClient(), 
+		ClientSet: clientSet, 
+		Ch: make(chan controllers.Pod),
 	}
+
+	// Start preprocessor
+	go podPreprocessReconciler.Preprocess()
+	
 	podPreprocessReconciler.SetupWithManager(manager) 
 	if err != nil {
 		log.Fatal(err, "could not create podPreprocessReconciler")

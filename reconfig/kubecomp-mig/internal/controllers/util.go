@@ -52,6 +52,10 @@ type KeyToQueue struct {
 	lookup map[string][]string
 }
 
+func (k *KeyToQueue) IsEmpty() bool {
+	return len(k.lookup) == 0
+}
+
 func (k *KeyToQueue) Add(key string, value string) {
 	if k.lookup == nil {
 		k.lookup = make(map[string][]string)

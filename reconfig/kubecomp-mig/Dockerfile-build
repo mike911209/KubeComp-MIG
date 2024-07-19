@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+FROM nvidia/cuda:12.5.1-cudnn-devel-ubuntu22.04
 
 RUN apt-get update && apt-get install -y wget
 RUN wget https://go.dev/dl/go1.22.3.linux-amd64.tar.gz && \

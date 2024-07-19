@@ -2,8 +2,10 @@ package gpu
 
 import (
 	"fmt"
-	nvlibNvml "github.com/NVIDIA/go-nvml/pkg/nvml"
+	"strings"
+
 	nvlibdevice "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
+	nvlibNvml "github.com/NVIDIA/go-nvml/pkg/nvml"
 )
 
 type ClientImpl struct {
@@ -11,11 +13,17 @@ type ClientImpl struct {
 	nvlibClient nvlibdevice.Interface
 }
 
+type MigInfo struct {
+	DeviceID string
+	GpuID    int
+	Profile  string
+}
+
 func NewClient() ClientImpl {
 	nvmlClient := nvlibNvml.New()
 	return ClientImpl{
 		nvmlClient:  nvmlClient,
-		nvlibClient: nvlibdevice.New(nvlibdevice.WithNvml(nvmlClient), nvlibdevice.WithVerifySymbols(false),),
+		nvlibClient: nvlibdevice.New(nvlibdevice.WithNvml(nvmlClient), nvlibdevice.WithVerifySymbols(false)),
 	}
 }
 
@@ -72,4 +80,46 @@ func (c *ClientImpl) GetMigDeviceGpuIndex(migDeviceId string) (int, error) {
 		return 0, fmt.Errorf("GPU index of MIG device %s not found", migDeviceId)
 	}
 	return result, nil
+}
+
+func extract_profile(name string) string {
+	// extract the last part
+	parts := strings.Split(name, " ")
+
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	fmt.Printf("Failed to extract the profile. Device Name: %v\n", name)
+	return ""
+}
+
+func (c *ClientImpl) GetAllMigs() (map[string]MigInfo, error) {
+	mig_info := make(map[string]MigInfo)
+
+	if err := c.init(); err != nil {
+		return mig_info, err
+	}
+	defer c.shutdown()
+
+	err := c.nvlibClient.VisitDevices(func(i int, d nvlibdevice.Device) error {
+		migs, err := d.GetMigDevices()
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+		} else {
+			for _, m := range migs {
+				name, _ := m.GetName()
+				uuid, _ := m.GetUUID()
+				mig_info[uuid] = MigInfo{
+					DeviceID: uuid,
+					GpuID:    i,
+					Profile:  extract_profile(name),
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return mig_info, err
+	}
+	return mig_info, nil
 }
