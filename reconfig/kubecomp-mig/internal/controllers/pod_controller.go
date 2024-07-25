@@ -3,27 +3,42 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"k8s.io/client-go/kubernetes"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	corev1 "k8s.io/api/core/v1"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 type PodPreprocessReconciler struct {
 	client.Client
-	ClientSet 		*kubernetes.Clientset
-	Ch 				chan Pod
+	ClientSet *kubernetes.Clientset
+	Ch        chan Pod
 }
 
 const (
-	NodeAffinityLabel 	string 			= "expectedNode"
+	NodeAffinityLabel string = "expectedNode"
 )
+
+func (p *PodPreprocessReconciler) updateNodeAffinityLookup() {
+	// remove non-exist entries
+	keys := NodeAffinityLookup.GetAllKeys()
+	for _, key := range keys {
+		listOptions := metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("pod-template-hash=%s", key),
+		}
+		replicaSetList, err := p.ClientSet.AppsV1().ReplicaSets("").List(context.TODO(), listOptions)
+		if err != nil || len(replicaSetList.Items) == 0 {
+			NodeAffinityLookup.DeleteKey(key)
+		}
+	}
+}
 
 func (p *PodPreprocessReconciler) preprocessHandler(po Pod) {
 	log.Printf("Preprocess pod %s\n", po.name)
@@ -70,19 +85,19 @@ func (p *PodPreprocessReconciler) preprocessHandler(po Pod) {
 			}
 		}
 	}
+	p.updateNodeAffinityLookup()
 	log.Printf("Put pod %s back to ch again.\n", pod.Name)
 	p.Ch <- Pod{name: po.name, namespace: po.namespace}
-	return
 }
 
 func (p *PodPreprocessReconciler) Preprocess() {
 	log.Printf("Preprocess starts\n")
 	for {
-        pod, ok := <-p.Ch
-        if ok {
-            p.preprocessHandler(pod)
-        } 
-    }
+		pod, ok := <-p.Ch
+		if ok {
+			p.preprocessHandler(pod)
+		}
+	}
 }
 
 func (p *PodPreprocessReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -96,9 +111,9 @@ func (p *PodPreprocessReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if _, exists := pod.Labels[preprocessLabel]; exists {
 		return ctrl.Result{}, err
 	}
-	
+
 	p.Ch <- Pod{name: req.Name, namespace: req.Namespace}
-	
+
 	return ctrl.Result{}, err
 }
 
@@ -106,18 +121,18 @@ func (p *PodPreprocessReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Pod{}).
 		WithEventFilter(predicate.Funcs{
-            CreateFunc: func(e event.CreateEvent) bool {
-                return true
-            },
-            UpdateFunc: func(e event.UpdateEvent) bool {
-                return false
-            },
-            DeleteFunc: func(e event.DeleteEvent) bool {
-                return false
-            },
-            GenericFunc: func(e event.GenericEvent) bool {
-                return false
-            },
-        }).
+			CreateFunc: func(e event.CreateEvent) bool {
+				return true
+			},
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				return false
+			},
+			DeleteFunc: func(e event.DeleteEvent) bool {
+				return false
+			},
+			GenericFunc: func(e event.GenericEvent) bool {
+				return false
+			},
+		}).
 		Complete(p)
 }

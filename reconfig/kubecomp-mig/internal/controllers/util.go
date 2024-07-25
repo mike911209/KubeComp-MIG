@@ -2,37 +2,38 @@ package controllers
 
 import (
 	"errors"
-	corev1 "k8s.io/api/core/v1"
+
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 )
 
 const (
-	targetPodLabel			string = "targetPod"
-	targetNamespaceLabel	string = "targetNamespace"
-	kubecompStatus			string = "kubecomp.com/reconfig.state"
-	nvConfigLabel			string = "nvidia.com/mig.config"
-	nvMigStateLabel			string = "nvidia.com/mig.config.state"
-	preprocessLabel			string = "preprocess"
-	migConfigPath			string = "/etc/config/config.yaml"
-	migResources			string = "nvidia.com/mig"
-	podTemplateHash			string = "pod-template-hash"
-	gpuIDLabel 				string = "gpuIDs"
+	targetPodLabel       string = "targetPod"
+	targetNamespaceLabel string = "targetNamespace"
+	kubecompStatus       string = "kubecomp.com/reconfig.state"
+	nvConfigLabel        string = "nvidia.com/mig.config"
+	nvMigStateLabel      string = "nvidia.com/mig.config.state"
+	preprocessLabel      string = "preprocess"
+	migConfigPath        string = "/etc/config/config.yaml"
+	migResources         string = "nvidia.com/mig"
+	podTemplateHash      string = "pod-template-hash"
+	gpuIDLabel           string = "gpuIDs"
 )
 
 type MigConfig struct {
-	Devices    []int            `yaml:"devices"`
-	MigEnabled bool             `yaml:"mig-enabled"`
-	MigDevices map[string]int   `yaml:"mig-devices"`
+	Devices    []int          `yaml:"devices"`
+	MigEnabled bool           `yaml:"mig-enabled"`
+	MigDevices map[string]int `yaml:"mig-devices"`
 }
 
 type MigConfigYaml struct {
-	Version     string `yaml:"version"`
-	MigConfigs  map[string][]MigConfig `yaml:"mig-configs"`
+	Version    string                 `yaml:"version"`
+	MigConfigs map[string][]MigConfig `yaml:"mig-configs"`
 }
 
 type Pod struct {
-	name 			string
-	namespace 		string
+	name      string
+	namespace string
 }
 
 type Status string
@@ -81,13 +82,25 @@ func (k *KeyToQueue) DeleteFirstVal(key string) error {
 	return errors.New("Not found.")
 }
 
+func (k *KeyToQueue) DeleteKey(key string) {
+	delete(k.lookup, key)
+}
+
+func (k *KeyToQueue) GetAllKeys() []string {
+	var keys []string
+	for key := range k.lookup {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
 func isOwnedByDaemonSet(pod *corev1.Pod, daemonset *appsv1.DaemonSet) bool {
-    for _, ownerRef := range pod.OwnerReferences {
-        if ownerRef.Kind == "DaemonSet" && ownerRef.Name == daemonset.Name {
-            return true
-        }
-    }
-    return false
+	for _, ownerRef := range pod.OwnerReferences {
+		if ownerRef.Kind == "DaemonSet" && ownerRef.Name == daemonset.Name {
+			return true
+		}
+	}
+	return false
 }
 
 var NodeAffinityLookup KeyToQueue
