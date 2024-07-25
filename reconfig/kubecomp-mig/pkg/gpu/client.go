@@ -93,6 +93,36 @@ func extract_profile(name string) string {
 	return ""
 }
 
+func (c *ClientImpl) GetMigDeviceType(migDeviceId string) (string, error) {
+	if err := c.init(); err != nil {
+		return "", err
+	}
+	defer c.shutdown()
+
+	migType := ""
+	var err error
+	var found bool
+	err = c.nvlibClient.VisitMigDevices(func(gpuIndex int, _ nvlibdevice.Device, migIndex int, m nvlibdevice.MigDevice) error {
+		if found {
+			return nil
+		}
+		name, _ := m.GetName()
+		uuid, _ := m.GetUUID()
+		if uuid == migDeviceId {
+			migType = extract_profile(name)
+			found = true
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("failed to find mig type of %s", migDeviceId)
+	}
+	return migType, nil
+}
+
 func (c *ClientImpl) GetAllMigs() (map[string]MigInfo, error) {
 	mig_info := make(map[string]MigInfo)
 
