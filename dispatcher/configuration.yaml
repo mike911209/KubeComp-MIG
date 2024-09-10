@@ -1,0 +1,68 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: dispatcher
+  namespace: default
+spec:
+  template:
+    spec:
+      # imagePullSecrets:  
+      # - name: ghcr-login-secret 
+      serviceAccountName: dispatcher-service-account
+      containers:
+        - name: dispatcher-container
+          image: ghcr.io/deeeelin/dispatcher:latest
+          ports:
+            - containerPort: 8080
+          imagePullPolicy: Always # to check if registry get new image, else it will always pull the same image version
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dispatcher-service-account
+  namespace: default
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dispatcher
+rules:
+  - apiGroups:
+      - serving.knative.dev
+    resources:
+      - services
+    verbs:
+      - create
+      - get
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - list
+      - get
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - create
+      - get
+      - list
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dispatcher-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dispatcher
+subjects:
+  - kind: ServiceAccount
+    name: dispatcher-service-account
+    namespace: default
