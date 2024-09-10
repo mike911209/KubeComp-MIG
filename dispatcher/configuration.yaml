@@ -6,8 +6,8 @@ metadata:
 spec:
   template:
     spec:
-      imagePullSecrets:  
-      - name: ghcr-login-secret 
+      # imagePullSecrets:  
+      # - name: ghcr-login-secret 
       serviceAccountName: dispatcher-service-account
       containers:
         - name: dispatcher-container

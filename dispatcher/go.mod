@@ -1,4 +1,4 @@
-module frontent
+module KubeComp-Dispatcher
 
 go 1.22.3
 
