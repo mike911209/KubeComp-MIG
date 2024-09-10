@@ -20,21 +20,22 @@ clean:
 	kubectl delete -f $(KUBE_CONFIG)
 
 # Keep in mind , modelname cannot contain "/" 
-test_local:
-	curl -X POST http://dispatcher.default.127.0.0.1.sslip.io/ \
-	-H "Content-Type: application/json" \
-	-H "token: hi" \
-	-H "model: llama" \
+test:
+	curl -X POST http://localhost:8080 \
+        -H "Host: dispatcher.default.127.0.0.1.nip.io" \
+        -H "Content-Type: application/json" \
+	-H "token: What is Deep Learning?" \
+	-H "model: test" \
 	-H "slo: 3" \
 	-d '{"label": "original-service", "msg": "Hello, world!"}'
-
 test_remote:
 	curl -X POST http://localhost:8080 \
         -H "Host: dispatcher.default.127.0.0.1.nip.io" \
-	    -H "Content-Type: application/json" \
+	-H "Content-Type: application/json" \
+        -H "token: What is Deep Learning?" \
         -H "model: infer" \
         -H "slo: 3" \
-        -d '{"inputs":"What is Deep Learning?","parameters":{"max_new_tokens":20}}'
+        -d '{"label": "original-service", "msg": "Hello, world!"}'
 
 foward_remote:
 	kubectl port-forward --namespace kourier-system $(kubectl get pod -n kourier-system -l "app=3scale-kourier-gateway" --output=jsonpath="{.items[0].metadata.name}") 8080:8080 19000:9000 8443:8443
