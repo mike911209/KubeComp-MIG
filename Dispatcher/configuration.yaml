@@ -1,0 +1,98 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: dispatcher
+  namespace: default
+spec:
+  template:
+    spec:
+      # imagePullSecrets:  
+      # - name: ghcr-login-secret 
+      serviceAccountName: dispatcher-service-account
+      containers:
+        - name: dispatcher-container
+          image: ghcr.io/deeeelin/dispatcher:latest
+          ports:
+            - containerPort: 8080
+          imagePullPolicy: Always # to check if registry get new image, else it will always pull the same image version
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dispatcher-service-account
+  namespace: default
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dispatcher
+rules:
+  - apiGroups:
+      - serving.knative.dev
+    resources:
+      - services
+    verbs:
+      - create
+      - get
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - list
+      - get
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - create
+      - get
+      - list
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dispatcher-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dispatcher
+subjects:
+  - kind: ServiceAccount
+    name: dispatcher-service-account
+    namespace: default
+
+---
+# Register a PV to require storage on disk
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: knative-pv
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /net/storage149/autofs/css89
+
+--- 
+# Use a claim (similar to role binding) for a PV , then a pod use this PV as volume and call it 
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: knative-pv-claim
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: manual 
