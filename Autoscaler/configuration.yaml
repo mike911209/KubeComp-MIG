@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: autoscaler-deployment
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: autoscaler
+  template:
+    metadata:
+      labels:
+        app: autoscaler
+    spec:
+      serviceAccountName: autoscaler-sa
+      # nodeSelector:
+      #   node: minikube
+      containers:
+      - name: autoscaler-container
+        image: ghcr.io/deeeelin/autoscaler:local
+        ports:
+        - containerPort: 8080
+        env:
+        - name: METRICS_SCRAPE_INTERVAL
+          value: "120"  # 2 minutes in seconds
+        imagePullPolicy: Always # to check if registry get new image, else it will always pull the same image version
+      # imagePullSecrets:  
+      #   - name: ghcr-login-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: autoscaler-service
+  namespace: default
+spec:
+  selector:
+    app: autoscaler
+  ports:
+  - protocol: TCP
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: autoscaler
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "nodes/metrics", "pods", "services", "endpoints"]
+  verbs: ["get", "list", "watch", "update"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch", "update"]
+- apiGroups: ["serving.knative.dev"]
+  resources: ["*"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: autoscaler-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: autoscaler
+subjects:
+- kind: ServiceAccount
+  name: autoscaler-sa
+  namespace: default
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: autoscaler-sa
+  namespace: default
