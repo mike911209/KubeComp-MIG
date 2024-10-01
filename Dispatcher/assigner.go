@@ -11,9 +11,13 @@ import (
 	"net/http"
 	"time"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	monitoringclient "github.com/prometheus-operator/prometheus-operator/pkg/client/versioned/typed/monitoring/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"knative.dev/client/pkg/kn/commands"
 	servinglib "knative.dev/client/pkg/serving"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
@@ -193,6 +197,28 @@ func (a *Assigner) CreateNewService(spec ServiceSpec, requestPayloads []io.ReadC
 		log.Fatalf("Error creating Knative service: %s", err.Error())
 	}
 
+	log.Printf("Creating Prometheus support for service: %s", spec.Name)
+
+	//Set owner references to the newly created service
+	// Use the service name to find the running Knative service info and get its UID
+	existingService, err := client.GetService(context.Background(), spec.Name)
+	if err != nil {
+		log.Fatalf("Error getting Knative service: %s", err.Error())
+	}
+
+	ownerReferences := []metav1.OwnerReference{
+		{
+			APIVersion: "serving.knative.dev/v1",
+			Kind:       "Service",
+			Name:       existingService.ObjectMeta.Name,
+			UID:        existingService.ObjectMeta.UID,
+		},
+	}
+
+	// // Create Prometheus support with the owner references
+	a.createPromSupport(spec.Name, ownerReferences)
+	log.Printf("Prometheus support created for service: %s", spec.Name)
+
 	// wait for service be ready and forward payload
 	go a.waitForServiceReadyAndForward(spec, requestPayloads)
 }
@@ -292,4 +318,89 @@ func (a *Assigner) forwardRequest(Name string, requestPayload io.ReadCloser) {
 
 	log.Printf("Response Payload from service: %s", string(respPayload))
 	log.Println("Response sent back to original sender")
+}
+
+func (a *Assigner) createPromSupport(serviceName string, ownerReferences []metav1.OwnerReference) {
+	log.Printf("Creating Prometheus support for service: %s", serviceName)
+	config, _ := rest.InClusterConfig()
+	clientset, _ := kubernetes.NewForConfig(config)
+
+	log.Println("Creating Kubernetes service for Prometheus scraping")
+
+	// TODO : check if service is already created, if yes, skip, or else error occurs
+	createService(clientset, "default", serviceName, ownerReferences)
+
+	log.Println("Creating Prometheus ServiceMonitor")
+	createServiceMonitor(clientset, "default", serviceName, ownerReferences)
+
+	log.Printf("Prometheus support created successfully for service: %s", serviceName)
+}
+
+func createService(clientset *kubernetes.Clientset, namespace string, serviceName string, ownerReferences []metav1.OwnerReference) error {
+	log.Printf("Creating Kubernetes service: %s-promservice", serviceName)
+	service := &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            serviceName + "-00001" + "-promservice",
+			Namespace:       namespace,
+			OwnerReferences: ownerReferences,
+		},
+		Spec: v1.ServiceSpec{
+			Selector: map[string]string{
+				"app": serviceName + "-00001",
+			},
+			Ports: []v1.ServicePort{
+				{
+					Port:     8080,
+					Protocol: v1.ProtocolTCP,
+				},
+			},
+		},
+	}
+
+	_, err := clientset.CoreV1().Services(namespace).Create(context.TODO(), service, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("error creating service: %v", err)
+	}
+	log.Printf("Kubernetes Service for '%s' created successfully.\n", serviceName)
+	return nil
+}
+
+func createServiceMonitor(clientset *kubernetes.Clientset, namespace string, serviceName string, ownerReferences []metav1.OwnerReference) error {
+	log.Printf("Creating Prometheus ServiceMonitor: %s-servicemonitor", serviceName)
+
+	// Define the ServiceMonitor object
+	serviceMonitor := &monitoringv1.ServiceMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            serviceName + "-00001" + "-servicemonitor",
+			Namespace:       namespace,
+			OwnerReferences: ownerReferences, // Set OwnerReferences if applicable
+		},
+		Spec: monitoringv1.ServiceMonitorSpec{
+			Selector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": serviceName + "-00001",
+				},
+			},
+			Endpoints: []monitoringv1.Endpoint{
+				{
+					Port:     "metrics",
+					Interval: "10s",
+				},
+			},
+		},
+	}
+
+	config, _ := rest.InClusterConfig()
+	monitoringClient, err := monitoringclient.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("error creating monitoring client: %v", err)
+	}
+
+	_, err = monitoringClient.ServiceMonitors(namespace).Create(context.Background(), serviceMonitor, metav1.CreateOptions{})
+
+	if err != nil {
+		return fmt.Errorf("error creating service monitor: %v", err)
+	}
+	log.Printf("Prometheus ServiceMonitor for '%s' created successfully.\n", serviceName)
+	return nil
 }
