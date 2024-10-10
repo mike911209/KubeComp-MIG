@@ -1,7 +1,7 @@
 # Dispatcher Manual
 
 ## 1. Deploy dispatcher
-* In ibm128 : `cd ~/Dispatcher`
+
 * `$ make deploy`
 
 ## 2. Reach Dispatcher  nd setup 
