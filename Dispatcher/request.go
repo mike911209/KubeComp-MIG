@@ -16,6 +16,7 @@ type Request struct {
 	Token string                 `json:"token"` // string field for token
 	Env   map[string]string      `json:"env"`   // map of strings for env
 	Par   map[string]interface{} `json:"par"`   // slice of maps for par
+	Label map[string]string      `json:"label"` // labels to add on pod
 }
 type RequestGroup struct {
 	Requests []Request
@@ -71,6 +72,7 @@ func parseRequest(r *http.Request) Request {
 	log.Printf("Model: %s", req.Model)
 	log.Printf("Env: %v", req.Env)
 	log.Printf("Par: %v", req.Par)
+	log.Printf("SLO: %v", req.Label)
 
 	return req
 }

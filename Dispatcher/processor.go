@@ -19,6 +19,7 @@ type ServiceSpec struct {
 	Env        map[string]string
 	Name       string
 	Model      string
+	Label      map[string]string
 }
 
 type ResourceEstimate struct {
@@ -39,6 +40,7 @@ func (d Processor) DecideService(group RequestGroup) ServiceSpec {
 		Env:        group.Requests[0].Env,
 		Name:       group.Requests[0].Model,
 		Model:      group.Requests[0].Model,
+		Label:      group.Requests[0].Label,
 	}
 	//log.Printf("Decided ServiceSpec - CPU: %d, GPU: %d, Memory: %d, ServiceName: %s, Model: %s, SLO: %d", spec.CPU, spec.GPU, spec.Memory, spec.ServiceName, spec.Model, spec.SLO)
 	return spec

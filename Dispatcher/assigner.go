@@ -157,6 +157,7 @@ func (a *Assigner) CreateNewService(spec ServiceSpec, requestPayloads []io.ReadC
 				servinglib.UserImageAnnotationKey: "",
 				//	"autoscaling.knative.dev/max-scale": "1", // BUG HERE , not working // default let autoscaler at most scale to one
 			},
+			Labels: spec.Label,
 		},
 		Spec: servingv1.RevisionSpec{
 			PodSpec: v1.PodSpec{
