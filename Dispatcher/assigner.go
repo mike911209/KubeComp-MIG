@@ -14,8 +14,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"knative.dev/client/pkg/kn/commands"
 	servinglib "knative.dev/client/pkg/serving"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
@@ -198,26 +196,6 @@ func (a *Assigner) CreateNewService(spec ServiceSpec, requestPayloads []io.ReadC
 
 	log.Printf("Creating Prometheus support for service: %s", spec.Name)
 
-	//Set owner references to the newly created service
-	// Use the service name to find the running Knative service info and get its UID
-	existingService, err := client.GetService(context.Background(), spec.Name)
-	if err != nil {
-		log.Fatalf("Error getting Knative service: %s", err.Error())
-	}
-
-	ownerReferences := []metav1.OwnerReference{
-		{
-			APIVersion: "serving.knative.dev/v1",
-			Kind:       "Service",
-			Name:       existingService.ObjectMeta.Name,
-			UID:        existingService.ObjectMeta.UID,
-		},
-	}
-
-	// // Create Prometheus support with the owner references
-	a.createPromSupport(spec.Name, ownerReferences)
-	log.Printf("Prometheus support created for service: %s", spec.Name)
-
 	// wait for service be ready and forward payload
 	go a.waitForServiceReadyAndForward(spec, requestPayloads)
 }
@@ -317,22 +295,4 @@ func (a *Assigner) forwardRequest(Name string, requestPayload io.ReadCloser) {
 
 	log.Printf("Response Payload from service: %s", string(respPayload))
 	log.Println("Response sent back to original sender")
-}
-
-func (a *Assigner) createPromSupport(serviceName string, ownerReferences []metav1.OwnerReference) {
-	log.Printf("Creating Prometheus support for service: %s", serviceName)
-	config, _ := rest.InClusterConfig()
-	clientset, _ := kubernetes.NewForConfig(config)
-	PS := PromSupport{}
-
-	log.Println("Creating Kubernetes service for Prometheus scraping")
-
-	// TODO : check if service is already created, if yes, skip, or else error occurs
-	PS.createService(clientset, "default", serviceName, ownerReferences)
-
-	log.Println("Creating Prometheus ServiceMonitor")
-
-	PS.createServiceMonitor(clientset, "default", serviceName, ownerReferences)
-
-	log.Printf("Prometheus support created successfully for service: %s", serviceName)
 }
