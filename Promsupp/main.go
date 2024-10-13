@@ -107,12 +107,11 @@ func (PS *PromSupport) Run() {
 	config, _ := rest.InClusterConfig()
 	clientset, _ := kubernetes.NewForConfig(config)
 
-	revisions, err := client.ListRevisions(context.TODO())
-	if err != nil {
-		log.Fatalf("Failed to list Knative services in namespace %s: %v", "default", err)
-	}
-
 	for { // check within interval time
+		revisions, err := client.ListRevisions(context.TODO())
+		if err != nil {
+			log.Fatalf("Failed to list Knative services in namespace %s: %v", "default", err)
+		}
 		for _, revision := range revisions.Items { // iterate through all Knative services in namespace default
 
 			log.Println("Checking knative revision prom support : ", revision.Name)
