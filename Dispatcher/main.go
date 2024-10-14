@@ -25,7 +25,13 @@ func main() {
 
 // handleRequest processes incoming HTTP requests and enqueues them to request channel
 func handleRequest(w http.ResponseWriter, r *http.Request) {
-	log.Println("Received HTTP request")
+	log.Println("Received HTTP request:")
+	// Print the incoming request information
+	if r == nil {
+		http.Error(w, "Request is nil", http.StatusBadRequest)
+		return
+	}
+	log.Printf("Request Content: %v", r)
 
 	// Parse and enqueue the request
 	request := parseRequest(r)

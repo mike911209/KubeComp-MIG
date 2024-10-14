@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -15,6 +16,12 @@ import (
 	"k8s.io/client-go/rest"
 	"knative.dev/client/pkg/commands"
 )
+
+var ignoreList = []string{
+	"dispatcher",
+	"autoscaler",
+	"promsupp",
+}
 
 type PromSupport struct{}
 
@@ -108,11 +115,24 @@ func (PS *PromSupport) Run() {
 	clientset, _ := kubernetes.NewForConfig(config)
 
 	for { // check within interval time
-		revisions, err := client.ListRevisions(context.TODO())
+
+		revisions, err := client.ListRevisions(context.Background())
 		if err != nil {
 			log.Fatalf("Failed to list Knative services in namespace %s: %v", "default", err)
 		}
 		for _, revision := range revisions.Items { // iterate through all Knative services in namespace default
+			// Check if the revision name contains any of the ignore list items
+			ignore := false
+			for _, ignoreItem := range ignoreList {
+				if strings.Contains(revision.Name, ignoreItem) {
+					ignore = true
+					break
+				}
+			}
+			if ignore {
+				log.Printf("Ignoring revision: %s", revision.Name)
+				continue
+			}
 
 			log.Println("Checking knative revision prom support : ", revision.Name)
 			revisionName := revision.Name
