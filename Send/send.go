@@ -54,6 +54,7 @@ func main() {
 		return
 	}
 	model := models[modelIdx]
+
 	requests, err := strconv.Atoi(flag.Arg(1))
 	if err != nil {
 		log.Fatal("Invalid number of requests")
@@ -62,41 +63,40 @@ func main() {
 
 	fmt.Printf("Sending %d requests to model %s\n", requests, model)
 
-	jsonData := []byte(`{
-		"token": "` + prompt + `",
-		"par": {
-			"max_new_tokens": ` + strconv.Itoa(maxNewTokens) + `
-		},
-		"env": {
-			"MODEL_ID": "` + model + `", 
-			"HF_TOKEN": "` + os.Getenv("HF_TOKEN") + `"
-		},
-		"label": {}}
-	`)
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		log.Fatal("Error creating request")
-		return
-	}
-
-	req.Host = "dispatcher.default.127.0.0.1.nip.io"
-	req.Header.Set("Content-Type", "application/json")
-
 	client := &http.Client{}
 
 	for i := 0; i < requests; i++ {
 		fmt.Println("Sending request", i)
+		jsonData := []byte(`{
+			"token": "` + prompt + `",
+			"par": {
+				"max_new_tokens": ` + strconv.Itoa(maxNewTokens) + `
+			},
+			"env": {
+				"MODEL_ID": "` + model + `", 
+				"HF_TOKEN": "` + os.Getenv("HF_TOKEN") + `"
+			},
+			"label": {}}
+		`)
+
+		req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+		if err != nil {
+			log.Fatal("Error creating request")
+			return
+		}
+
+		req.Host = "dispatcher.default.127.0.0.1.nip.io"
+		req.Header.Set("Content-Type", "application/json")
 		if showBody {
 			log.Println(req.Body)
 		}
 		resp, err := client.Do(req)
 		if err != nil {
+			log.Printf("Error sending request: %v", err)
 			log.Fatal("Error sending request")
 			return
 		}
-		log.Println(resp.Body)
-		resp.Body.Close()
+		defer resp.Body.Close()
 		time.Sleep(30 * time.Millisecond)
 	}
 }
