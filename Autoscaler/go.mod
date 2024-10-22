@@ -1,13 +1,17 @@
 module autoscaler
 
-go 1.22.3
+go 1.23
+
+toolchain go1.23.1
 
 require (
+	github.com/prometheus/client_golang v1.19.1
+	k8s.io/api v0.30.3
 	k8s.io/apimachinery v0.30.3
 	k8s.io/client-go v0.30.3
+	knative.dev/client/pkg v0.0.0-20240925104631-c9f128423b58
+	knative.dev/serving v0.42.1-0.20240820122005-5f5f6d820b03
 )
-
-require golang.org/x/tools v0.24.0 // indirect
 
 require (
 	contrib.go.opencensus.io/exporter/ocagent v0.7.1-0.20200907061046-05415f1de66d // indirect
@@ -66,7 +70,6 @@ require (
 	github.com/pelletier/go-toml/v2 v2.0.9 // indirect
 	github.com/peterbourgon/diskv v2.0.1+incompatible // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/prometheus/client_golang v1.19.1 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.55.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
@@ -104,18 +107,15 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gotest.tools/v3 v3.3.0 // indirect
-	k8s.io/api v0.30.3 // indirect
 	k8s.io/apiextensions-apiserver v0.30.3 // indirect
 	k8s.io/apiserver v0.30.3 // indirect
 	k8s.io/cli-runtime v0.29.2 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20240808142205-8e686545bdb8 // indirect
 	k8s.io/utils v0.0.0-20240711033017-18e509b52bc8 // indirect
-	knative.dev/client/pkg v0.0.0-20240925104631-c9f128423b58 // indirect
 	knative.dev/eventing v0.42.1-0.20240828134450-34f9cd384dea // indirect
 	knative.dev/networking v0.0.0-20240815142417-37fdbdd0854b // indirect
 	knative.dev/pkg v0.0.0-20240815051656-89743d9bbf7c // indirect
-	knative.dev/serving v0.42.1-0.20240820122005-5f5f6d820b03 // indirect
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/kustomize/api v0.13.5-0.20230601165947-6ce0bf390ce3 // indirect
 	sigs.k8s.io/kustomize/kyaml v0.14.3-0.20230601165947-6ce0bf390ce3 // indirect

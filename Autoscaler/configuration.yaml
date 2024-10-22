@@ -18,12 +18,12 @@ spec:
       #   node: minikube
       containers:
       - name: autoscaler-container
-        image: ghcr.io/deeeelin/autoscaler:local
+        image: ghcr.io/mike911209/autoscaler:local
         ports:
         - containerPort: 8080
         env:
         - name: METRICS_SCRAPE_INTERVAL
-          value: "120"  # 2 minutes in seconds
+          value: "10"  # 2 minutes in seconds
         imagePullPolicy: Always # to check if registry get new image, else it will always pull the same image version
       # imagePullSecrets:  
       #   - name: ghcr-login-secret
@@ -33,13 +33,50 @@ kind: Service
 metadata:
   name: autoscaler-service
   namespace: default
+  labels:
+    app: autoscaler
 spec:
   selector:
     app: autoscaler
   ports:
-  - protocol: TCP
+  - name: metrics
+    protocol: TCP
     port: 8080
     targetPort: 8080
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app: autoscaler
+  name: autoscaler-servicemonitor
+  namespace: default
+spec:
+  endpoints:
+  - interval: 10s
+    port: metrics
+  selector:
+    matchLabels:
+      app: autoscaler
+---
+# apiVersion: serving.knative.dev/v1
+# kind: Service
+# metadata:
+#   name: autoscaler
+#   namespace: default
+# spec:
+#   template:
+#     spec:
+#       serviceAccountName: autoscaler-sa
+#       containers:
+#         - name: autoscaler-container
+#           image: ghcr.io/mike911209/autoscaler:latest
+#           ports:
+#             - containerPort: 8080
+#           env:
+#           - name: METRICS_SCRAPE_INTERVAL
+#             value: "10"  # 2 minutes in seconds
+#           imagePullPolicy: Always # to check if registry get new image, else it will always pull the same image version
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

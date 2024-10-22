@@ -7,7 +7,7 @@ KUBE_CONFIG=configuration.yaml
 set:
 	eval $(minikube docker-env)
 build:
-	docker build -t ghcr.io/deeeelin/$(IMAGE_NAME):$(IMAGE_TAG) --push .
+	docker build -t ghcr.io/mike911209/$(IMAGE_NAME):$(IMAGE_TAG) --push .
 
 # Apply Kubernetes configuration
 deploy:

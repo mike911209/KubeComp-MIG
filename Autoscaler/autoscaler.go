@@ -18,6 +18,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"knative.dev/client/pkg/commands"
+	serving "knative.dev/client/pkg/serving/v1"
+	kv1 "knative.dev/serving/pkg/apis/serving/v1"
 )
 
 const prometheusURL = "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/query"
@@ -29,6 +31,7 @@ const (
 	NOT_SCALING = iota
 	SCALING_UP
 	SCALING_DOWN
+	SCALING_IN
 )
 const (
 	MIG_1G = iota
@@ -38,16 +41,8 @@ const (
 	MIG_7G
 )
 
-// Globally defined MIG configurations, from small to big
-var migConfigs = []string{
-	"nvidia.com/mig-1g.5gb",
-	"nvidia.com/mig-2g.10gb",
-	"nvidia.com/mig-3g.20gb",
-	"nvidia.com/mig-4g.20gb",
-	"nvidia.com/mig-7g.40gb",
-}
-
 type PodData struct {
+	podName            string
 	currentGPU         int64 // 0 for smallest, 4 for biggest
 	TGI_REQUEST_METRIC float64
 }
@@ -56,9 +51,12 @@ type NodeResources struct {
 	migSlices map[string]int
 }
 type ResourceSpec struct {
-	cpu      string
-	memory   string
-	migSlice map[string]int
+	podName     string
+	scalingType int
+	cpu         string
+	memory      string
+	migSlice    map[string]int
+	slo         float64
 }
 type Autoscaler struct {
 	Clientset          *kubernetes.Clientset
@@ -66,6 +64,22 @@ type Autoscaler struct {
 	scaleUpThreshold   float64
 	scaleDownThreshold float64
 }
+type Event struct {
+	revisionName string
+	scalingType  int // SCALING_UP, SCALING_DOWN, ...
+	resourceName string
+}
+
+var (
+	migConfigs = []string{
+		"nvidia.com/mig-1g.5gb",
+		"nvidia.com/mig-2g.10gb",
+		"nvidia.com/mig-3g.20gb",
+		"nvidia.com/mig-4g.20gb",
+		"nvidia.com/mig-7g.40gb",
+	}
+	EventsChan = make(chan Event)
+)
 
 func NewAutoscaler() (*Autoscaler, error) {
 	_scaleUpThreshold := os.Getenv("SCALE_UP_THRESHOLD")
@@ -107,7 +121,7 @@ func NewAutoscaler() (*Autoscaler, error) {
 	}, nil
 }
 
-func (a *Autoscaler) fetchPrometheusData(metric string, query string, serviceMetrics map[string]map[string]float64) error {
+func (a *Autoscaler) fetchPrometheusData(metric string, query string, podMetrics map[string]float64) error {
 	resp, err := http.Get(fmt.Sprintf("%s?query=%s", prometheusURL, query))
 	if err != nil {
 		return fmt.Errorf("failed to fetch data from Prometheus: %v", err)
@@ -138,12 +152,7 @@ func (a *Autoscaler) fetchPrometheusData(metric string, query string, serviceMet
 		if err != nil {
 			return fmt.Errorf("failed to parse value: %v", err)
 		}
-		podName := res.Metric["pod"]
-		if _, exists := serviceMetrics[podName]; !exists {
-			serviceMetrics[podName] = make(map[string]float64)
-		}
-		log.Printf("Pod: %s, Metric: %s, Value: %f\n", podName, metric, value)
-		serviceMetrics[podName][metric] = value
+		podMetrics[metric] = value
 	}
 
 	return nil
@@ -172,44 +181,55 @@ func (a *Autoscaler) shouldScale(podData PodData, nodeResources NodeResources, S
 	//TODO : define scaling decision logic
 	log.Println("Checking if should scale - PodData:", podData, "NodeResources:", nodeResources, "SLO:", SLO)
 
-	spec := ResourceSpec{}
-	spec.cpu = "1"
-	spec.memory = "90Gi"
+	spec := ResourceSpec{
+		podName:     podData.podName,
+		scalingType: NOT_SCALING,
+		cpu:         "1",
+		memory:      "90Gi",
+	}
 
 	if podData.TGI_REQUEST_METRIC < SLO*a.scaleDownThreshold || notReceivingRequest {
-		if podData.currentGPU == MIG_1G {
-			log.Println("Pod is already using the smallest mig gpu")
-			return NOT_SCALING, spec
-		} else {
-			// check if next smaller mig slice is available
-			if nodeResources.migSlices[migConfigs[podData.currentGPU-1]] > 0 {
-				spec.migSlice = map[string]int{migConfigs[podData.currentGPU-1]: 1}
-			} else {
-				log.Println("No mig slices available for scaling down")
-				return NOT_SCALING, spec
-			}
-		}
-		log.Println("Scaling down")
-		return SCALING_DOWN, spec
+		return a.scaleDown(podData, nodeResources, spec)
 	} else if podData.TGI_REQUEST_METRIC > SLO*a.scaleUpThreshold {
-		if podData.currentGPU == MIG_7G {
-			log.Println("Pod is already using the biggest mig gpu")
-			return NOT_SCALING, spec
-		} else {
-			// check if next bigger mig slice is available
-			if nodeResources.migSlices[migConfigs[podData.currentGPU+1]] > 0 {
-				spec.migSlice = map[string]int{migConfigs[podData.currentGPU+1]: 1}
-			} else {
-				log.Println("No mig slices available for scaling up")
-				return NOT_SCALING, spec
-			}
-		}
-		log.Println("Scaling up")
-		return SCALING_UP, spec
-	} else {
-		log.Println("No scaling needed")
+		return a.scaleUp(podData, nodeResources, spec)
+	}
+
+	log.Println("No scaling needed")
+	return NOT_SCALING, spec
+}
+
+func (a *Autoscaler) scaleDown(podData PodData, nodeResources NodeResources, spec ResourceSpec) (int, ResourceSpec) {
+	if podData.currentGPU == MIG_1G {
+		log.Println("Pod is already using the smallest MIG GPU")
 		return NOT_SCALING, spec
 	}
+
+	if nodeResources.migSlices[migConfigs[podData.currentGPU-1]] > 0 {
+		spec.migSlice = map[string]int{migConfigs[podData.currentGPU-1]: 1}
+		log.Println("Scaling down")
+		spec.scalingType = SCALING_DOWN
+		return SCALING_DOWN, spec
+	}
+
+	log.Println("No MIG slices available for scaling down")
+	return NOT_SCALING, spec
+}
+
+func (a *Autoscaler) scaleUp(podData PodData, nodeResources NodeResources, spec ResourceSpec) (int, ResourceSpec) {
+	if podData.currentGPU == MIG_7G {
+		log.Println("Pod is already using the biggest MIG GPU")
+		return NOT_SCALING, spec
+	}
+
+	if nodeResources.migSlices[migConfigs[podData.currentGPU+1]] > 0 {
+		spec.migSlice = map[string]int{migConfigs[podData.currentGPU+1]: 1}
+		log.Println("Scaling up")
+		spec.scalingType = SCALING_UP
+		return SCALING_UP, spec
+	}
+
+	log.Println("No MIG slices available for scaling up")
+	return NOT_SCALING, spec
 }
 
 func (a *Autoscaler) scaleKnativeService(serviceName string, spec ResourceSpec) {
@@ -221,9 +241,7 @@ func (a *Autoscaler) scaleKnativeService(serviceName string, spec ResourceSpec) 
 	log.Printf("Scaling Knative service - Name: %s", serviceName)
 
 	// Create new knative serving client
-	p := commands.KnParams{}
-	p.Initialize()
-	client, err := p.NewServingClient("default")
+	client, err := a.createKnativeClient()
 	if err != nil {
 		log.Fatalf("Error creating Knative serving client: %s", err.Error())
 	}
@@ -237,35 +255,65 @@ func (a *Autoscaler) scaleKnativeService(serviceName string, spec ResourceSpec) 
 
 	// copy spec of unscaled service to new service
 	newService := oldService.DeepCopy()
-
-	// Modify the copy with the new resource settings
-	for i := range newService.Spec.Template.Spec.Containers {
-		newService.Spec.Template.Spec.Containers[i].Resources.Requests[v1.ResourceMemory] = resource.MustParse(spec.memory)
-		newService.Spec.Template.Spec.Containers[i].Resources.Limits[v1.ResourceMemory] = resource.MustParse(spec.memory)
-		newService.Spec.Template.Spec.Containers[i].Resources.Requests[v1.ResourceCPU] = resource.MustParse(spec.cpu)
-		newService.Spec.Template.Spec.Containers[i].Resources.Limits[v1.ResourceCPU] = resource.MustParse(spec.cpu)
-		for _, migConfig := range migConfigs {
-			if spec.migSlice[migConfig] > 0 {
-				newService.Spec.Template.Spec.Containers[i].Resources.Requests[v1.ResourceName(migConfig)] = resource.MustParse("1")
-				newService.Spec.Template.Spec.Containers[i].Resources.Limits[v1.ResourceName(migConfig)] = resource.MustParse("1")
-			} else {
-				delete(newService.Spec.Template.Spec.Containers[i].Resources.Requests, v1.ResourceName(migConfig))
-				delete(newService.Spec.Template.Spec.Containers[i].Resources.Limits, v1.ResourceName(migConfig))
-			}
-		}
-	}
+	a.updateServiceSpec(newService, spec)
 
 	// Create the new service with the updated spec
 	ctx := context.Background()
 	log.Printf("Update Knative service: %s's resource spec", serviceName)
+	// write slo to pod label
+	if newService.Spec.Template.Labels == nil {
+		newService.Spec.Template.Labels = make(map[string]string)
+	}
+	newService.Spec.Template.Labels["slo"] = fmt.Sprintf("%f", spec.slo)
 	_, err = client.UpdateService(ctx, newService)
 	if err != nil {
 		log.Printf("Error creating Knative service: %s", err.Error())
 	}
 
+	a.waitForNewRevision(client, oldService)
+	newService, err = client.GetService(context.TODO(), serviceName)
+	if err != nil {
+		log.Fatalf("Failed to get Knative service: %v", err)
+		return
+	}
+	a.changeTrafficToNewRevision(client, newService)
+	a.deleteOldRevision(client, oldService)
+
+	newService, err = client.GetService(context.TODO(), serviceName)
+	if err != nil {
+		log.Fatalf("Failed to get Knative service: %v", err)
+		return
+	}
+	a.labelServiceAsDone(client, newService)
+
+	log.Println("Knative service scaled successfully")
+
+	a.sendScalingEvent(newService, spec)
+}
+
+func (a *Autoscaler) updateServiceSpec(service *kv1.Service, spec ResourceSpec) {
+	for i := range service.Spec.Template.Spec.Containers {
+		container := &service.Spec.Template.Spec.Containers[i]
+		container.Resources.Requests[v1.ResourceMemory] = resource.MustParse(spec.memory)
+		container.Resources.Limits[v1.ResourceMemory] = resource.MustParse(spec.memory)
+		container.Resources.Requests[v1.ResourceCPU] = resource.MustParse(spec.cpu)
+		container.Resources.Limits[v1.ResourceCPU] = resource.MustParse(spec.cpu)
+		for _, migConfig := range migConfigs {
+			if spec.migSlice[migConfig] > 0 {
+				container.Resources.Requests[v1.ResourceName(migConfig)] = resource.MustParse("1")
+				container.Resources.Limits[v1.ResourceName(migConfig)] = resource.MustParse("1")
+			} else {
+				delete(container.Resources.Requests, v1.ResourceName(migConfig))
+				delete(container.Resources.Limits, v1.ResourceName(migConfig))
+			}
+		}
+	}
+}
+
+func (a *Autoscaler) waitForNewRevision(client serving.KnServingClient, oldService *kv1.Service) {
 	log.Printf("Waiting for new revision to be ready...")
 	for {
-		changedService, err := client.GetService(context.TODO(), serviceName)
+		changedService, err := client.GetService(context.TODO(), oldService.Name)
 		if err != nil {
 			log.Fatalf("Failed to get Knative service: %v", err)
 			return
@@ -275,131 +323,169 @@ func (a *Autoscaler) scaleKnativeService(serviceName string, spec ResourceSpec) 
 		}
 		time.Sleep(1 * time.Second)
 	}
+}
 
+func (a *Autoscaler) changeTrafficToNewRevision(client serving.KnServingClient, newService *kv1.Service) {
 	log.Printf("Change traffic to the new revision")
-	// Get the modified service instance
-	newService, err = client.GetService(context.TODO(), serviceName)
-	if err != nil {
-		log.Fatalf("Failed to get Knative service: %v", err)
-		return
-	}
 	newService.Status.Traffic[0].RevisionName = newService.Status.LatestReadyRevisionName
-	_, err = client.UpdateService(ctx, newService)
+	_, err := client.UpdateService(context.Background(), newService)
 	if err != nil {
-		log.Fatalf("Failed to update service %s: %v", serviceName, err)
+		log.Fatalf("Failed to update service %s: %v", newService.Name, err)
 	}
+}
 
+func (a *Autoscaler) deleteOldRevision(client serving.KnServingClient, oldService *kv1.Service) {
 	log.Printf("Deleting the old revision")
 	time.Sleep(30 * time.Second) // time for old revision to finish requests in progress
-	err = client.DeleteRevision(ctx, oldService.Status.LatestReadyRevisionName, time.Hour*24)
+	err := client.DeleteRevision(context.Background(), oldService.Status.LatestReadyRevisionName, time.Hour*24)
 	if err != nil {
 		log.Fatalf("Failed to delete old revision %s: %v", oldService.Status.LatestReadyRevisionName, err)
 	}
 	log.Printf("Old revision deleted") // but the pods is still in terminate state
-
-	newService, err = client.GetService(context.TODO(), serviceName)
-	if err != nil {
-		log.Fatalf("Failed to get Knative service: %v", err)
-		return
+	EventsChan <- Event{
+		revisionName: oldService.Status.LatestReadyRevisionName,
+		scalingType:  SCALING_IN,
+		resourceName: "",
 	}
-	// label as done to enable scale again
+}
+
+func (a *Autoscaler) labelServiceAsDone(client serving.KnServingClient, newService *kv1.Service) {
 	newService.Labels["auto-scaler"] = "done"
-	_, err = client.UpdateService(ctx, newService)
+	_, err := client.UpdateService(context.Background(), newService)
 	if err != nil {
-		log.Fatalf("Failed to update service %s: %v", serviceName, err)
+		log.Fatalf("Failed to update service %s: %v", newService.Name, err)
 	}
+}
 
-	log.Println("Knative service scaled successfully")
+func (a *Autoscaler) sendScalingEvent(service *kv1.Service, spec ResourceSpec) {
+	for slice, count := range spec.migSlice {
+		if count > 0 {
+			EventsChan <- Event{
+				revisionName: service.Status.LatestReadyRevisionName,
+				scalingType:  spec.scalingType,
+				resourceName: slice,
+			}
+			break
+		}
+	}
 }
 
 func (a *Autoscaler) processKnativeService(serviceName string) {
-	serviceMetrics := make(map[string]map[string]float64)
-	queryList := map[string]string{
-		TGI_REQUEST_METRIC: fmt.Sprintf(`increase(tgi_request_mean_time_per_token_duration_sum{pod=~"%s-.*"}[1m])/increase(tgi_request_mean_time_per_token_duration_count{pod=~"%s-.*"}[1m])`,
-			serviceName, serviceName),
-		TGI_REQUEST_METRIC_COUNT: fmt.Sprintf(`increase(tgi_request_mean_time_per_token_duration_count{pod=~"%s-.*"}[1m])`, serviceName),
-	}
-	for name, query := range queryList {
-		a.fetchPrometheusData(name, query, serviceMetrics)
+	podList, err := a.Clientset.CoreV1().Pods("default").List(context.TODO(), metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("serving.knative.dev/service=%s", serviceName),
+	})
+	if err != nil {
+		log.Printf("Failed to list pods for service %s: %v", serviceName, err)
+		return
 	}
 
-	for podName, podMetrics := range serviceMetrics {
-		// TODO: not getting podInfo every time even though pods is not changing
-		podInfo, err := a.Clientset.CoreV1().Pods("default").Get(context.TODO(), podName, metav1.GetOptions{})
-		if err != nil {
-			log.Printf("Failed to get pod info %s: %v", podName, err)
-			continue
-		}
+	podMetrics := make(map[string]float64)
 
-		// check if pod is running (b.c. even pod is terminating, prometheus can still return metrics)
-		if podInfo.Status.Phase != v1.PodRunning || podInfo.DeletionTimestamp != nil {
+	for _, pod := range podList.Items {
+		podName := pod.Name
+
+		// Check if pod is running
+		if pod.Status.Phase != v1.PodRunning || pod.DeletionTimestamp != nil {
 			log.Printf("Pod %s is not running", podName)
+			EventsChan <- Event{
+				revisionName: pod.Labels["serving.knative.dev/revision"],
+				scalingType:  NOT_SCALING,
+				resourceName: "",
+			}
 			continue
 		}
 
-		// if not receiving request in 60s -> scale down directly
-		notReceiveingRequest := false
-		if podMetrics[TGI_REQUEST_METRIC_COUNT] == 0 {
-			log.Printf("Pod %s is not receiving request", serviceName)
-			notReceiveingRequest = true
-		}
-
-		// obtain SLO from pod's label
-		SLO, err := strconv.ParseFloat(podInfo.Labels["slo"], 64)
+		// Obtain SLO from pod's label
+		SLO, err := strconv.ParseFloat(pod.Labels["slo"], 64)
 		if err != nil {
 			log.Printf("Failed to parse SLO for pod %s: %v", podName, err)
 			continue
 		}
 
-		// get node resources
-		nodeName := podInfo.Spec.NodeName
+		// Get node resources
+		nodeName := pod.Spec.NodeName
 		nodeResources, err := a.getNodeResources(nodeName)
 		if err != nil {
 			log.Printf("Error getting resources for pod %s: %v", podName, err)
 			continue
 		}
 
-		// obtain current mig gpu used by pod
+		// Obtain current MIG GPU used by pod
 		usingMigGPU := false
 		var gpuUsedIndex int64
 		for index, migConfig := range migConfigs {
-			rQuant := podInfo.Spec.Containers[0].Resources.Requests[v1.ResourceName(migConfig)]
+			rQuant := pod.Spec.Containers[0].Resources.Requests[v1.ResourceName(migConfig)]
 			if rQuant.Value() > 0 {
 				usingMigGPU = true
 				gpuUsedIndex = int64(index)
-				break // since currently a pod (CUDA process) can only use one mig gpu
+				break // since currently a pod (CUDA process) can only use one MIG GPU
 			}
 		}
 		if !usingMigGPU {
-			log.Printf("Pod %s is not using any GPU", serviceName)
+			log.Printf("Pod %s is not using any GPU", podName)
 			continue
 		}
-		log.Printf("GPU used by pod %s: %s", serviceName, migConfigs[gpuUsedIndex])
+		log.Printf("GPU used by pod %s: %s", podName, migConfigs[gpuUsedIndex])
 
-		// assign processed metrics to PodResources struct for further reference
+		// Send Prometheus query
+		queryList := map[string]string{
+			TGI_REQUEST_METRIC: fmt.Sprintf(`increase(tgi_request_mean_time_per_token_duration_sum{pod="%s"}[1m])/increase(tgi_request_mean_time_per_token_duration_count{pod="%s"}[1m])`,
+				podName, podName),
+			TGI_REQUEST_METRIC_COUNT: fmt.Sprintf(`increase(tgi_request_mean_time_per_token_duration_count{pod="%s"}[1m])`, podName),
+		}
+		for name, query := range queryList {
+			a.fetchPrometheusData(name, query, podMetrics)
+		}
+
+		// If not receiving request in 60s -> scale down directly
+		notReceivingRequest := false
+		value, exists := podMetrics[TGI_REQUEST_METRIC_COUNT]
+		if !exists {
+			// prometheus hasn't recognize the pod
+			log.Printf("Promeheus hasn't found the pod in revision: %s", pod.Labels["serving.knative.dev/revision"])
+			EventsChan <- Event{
+				revisionName: pod.Labels["serving.knative.dev/revision"],
+				scalingType:  NOT_SCALING,
+				resourceName: migConfigs[gpuUsedIndex],
+			}
+			return
+		}
+
+		if exists && value == 0 {
+			log.Printf("Pod %s is not receiving request", podName)
+			notReceivingRequest = true
+		}
+
+		// Assign processed metrics to PodResources struct for further reference
 		podData := PodData{
+			podName:            podName,
 			currentGPU:         gpuUsedIndex,
 			TGI_REQUEST_METRIC: podMetrics[TGI_REQUEST_METRIC],
 		}
 
-		// check if should scale
-		scaleDecision, spec := a.shouldScale(podData, nodeResources, SLO, notReceiveingRequest)
+		// Check if should scale
+		scaleDecision, spec := a.shouldScale(podData, nodeResources, SLO, notReceivingRequest)
 		if scaleDecision == SCALING_UP || scaleDecision == SCALING_DOWN {
 			log.Println("Scaling decision:", scaleDecision, "Spec:", spec)
 
 			a.labelScaling(serviceName)
 
+			spec.slo = SLO
 			go a.scaleKnativeService(serviceName, spec)
+		} else {
+			log.Printf("Pod %s is not scaling", podName)
+			EventsChan <- Event{
+				revisionName: pod.Labels["serving.knative.dev/revision"],
+				scalingType:  NOT_SCALING,
+				resourceName: migConfigs[podData.currentGPU],
+			}
 		}
 	}
 }
 
 // labelScaling labels the service that is being scaling, preventing it from being processed again
 func (a *Autoscaler) labelScaling(serviceName string) {
-	// Create new knative serving client
-	p := commands.KnParams{}
-	p.Initialize()
-	client, err := p.NewServingClient("default")
+	client, err := a.createKnativeClient()
 	if err != nil {
 		log.Fatalf("Error creating Knative serving client: %s", err.Error())
 	}
@@ -430,6 +516,12 @@ func (a *Autoscaler) labelScaling(serviceName string) {
 	log.Printf("Service %s labeled for scaling", serviceName)
 }
 
+func (a *Autoscaler) createKnativeClient() (serving.KnServingClient, error) {
+	p := commands.KnParams{}
+	p.Initialize()
+	return p.NewServingClient("default")
+}
+
 func main() {
 	log.Printf("Starting Autoscaler...\n")
 	Autoscaler, err := NewAutoscaler() // create new metric fetcher, initialize all member variables
@@ -444,6 +536,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error creating Knative serving client: %s", err.Error())
 	}
+
+	Exporter := NewExporter()
+	go Exporter.StartExporter(Autoscaler.ScrapeInterval) // start the exporter to expose metrics
 
 	for { // check within interval time
 		services, err := client.ListServices(context.TODO())
