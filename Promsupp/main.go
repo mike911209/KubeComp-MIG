@@ -19,7 +19,6 @@ import (
 
 var ignoreList = []string{
 	"dispatcher",
-	"autoscaler",
 	"promsupp",
 }
 
