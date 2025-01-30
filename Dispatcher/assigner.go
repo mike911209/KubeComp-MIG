@@ -257,7 +257,7 @@ func (a *Assigner) forwardRequest(Name string, requestPayload io.ReadCloser) {
 
 	// Set the Host header to Name.default.127.0.0.1.nip.io
 	host := fmt.Sprintf("%s.default.127.0.0.1.nip.io", Name)
-	url := "http://kourier-internal.kourier-system.svc.cluster.local"
+	url := "http://kourier-internal.kourier-system.svc.cluster.local/generate"
 
 	// Create the HTTP POST request
 	client := &http.Client{}
