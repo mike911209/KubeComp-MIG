@@ -22,10 +22,10 @@ last_empty = False
 
 app = Flask(__name__)
 
-MODEL_NAME = os.getenv("MODEL_NAME")
-MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE"))
-BATCH_TIME = float(os.getenv("BATCH_TIME"))
-TIMEOUT = float(os.getenv("TIMEOUT"))
+MODEL_NAME = os.getenv("MODEL_NAME", "openai-community/gpt2")
+MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "50"))
+BATCH_TIME = float(os.getenv("BATCH_TIME","0.1"))
+TIMEOUT = float(os.getenv("TIMEOUT","60"))
 
 # MODEL_NAME = "gpt2"
 # MAX_BATCH_SIZE = 20
