@@ -448,7 +448,7 @@ func (a *Autoscaler) processKnativeService(serviceName string) {
 				scalingType:  NOT_SCALING,
 				resourceName: migConfigs[gpuUsedIndex],
 			}
-			return
+			continue
 		}
 
 		if exists && value == 0 {
