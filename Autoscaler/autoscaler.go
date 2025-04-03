@@ -187,7 +187,7 @@ func (a *Autoscaler) processPod(serviceName string, pod v1.Pod) error {
 
 	// Step 4: Obtain metrics from Prometheus
 	// TODO finish fetch metrics
-	revisionData.metrics, err = a.fetcher.FetchPodMetrics(pod.Name)
+	revisionData.metrics, err = a.fetcher.FetchPodMetrics(pod)
 	if err != nil {
 		return fmt.Errorf("failed to fetch metrics for pod %s: %w", pod.Name, err)
 	}

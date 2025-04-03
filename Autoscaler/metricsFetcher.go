@@ -11,12 +11,13 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v2"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
 type MetricFetcher interface {
-	FetchPodMetrics(podName string) (map[Metric]float64, error)
+	FetchPodMetrics(pod v1.Pod) (map[Metric]float64, error)
 }
 
 func NewSimpleFetcher(config Config, kubeClient *kubernetes.Clientset) MetricFetcher {
@@ -48,13 +49,21 @@ type Metric struct {
 	ScaleUpFactor   float64 `yaml:"scaleUpFactor"`
 }
 
-func (f *SimpleFetcher) FetchPodMetrics(podName string) (map[Metric]float64, error) {
+func (f *SimpleFetcher) FetchPodMetrics(pod v1.Pod) (map[Metric]float64, error) {
 	// Fetch the config map for metrcs information
 	configMaps, err := f.kubeClient.CoreV1().ConfigMaps(f.namespace).Get(context.TODO(), f.cfgMapName, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config map %s: %v", f.cfgMapName, err)
 	}
-	metricCfg := configMaps.Data["metrics"]
+
+	cfgName := strings.Split(pod.Labels["app"], "-")[0]
+	if cfgName == "" {
+		return nil, fmt.Errorf("failed to get app name from pod %s: %v", pod.Name, err)
+	}
+	metricCfg := configMaps.Data[cfgName]
+	if metricCfg == "" {
+		return nil, fmt.Errorf("failed to get metrics config for pod %s: %v", pod.Name, err)
+	}
 
 	var metricsInfo []Metric
 	err = yaml.Unmarshal([]byte(metricCfg), &metricsInfo)
@@ -74,7 +83,7 @@ func (f *SimpleFetcher) FetchPodMetrics(podName string) (map[Metric]float64, err
 		count := strings.Count(query, "%s")
 		args := make([]interface{}, count)
 		for i := 0; i < count; i++ {
-			args[i] = podName
+			args[i] = pod.Name
 		}
 		query = fmt.Sprintf(query, args...)
 
