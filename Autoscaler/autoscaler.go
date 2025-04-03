@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -56,24 +55,24 @@ type Autoscaler struct {
 	kubeClient    *kubernetes.Clientset
 	exporter      *Exporter
 	knativeHelper *KnativeHelper
-	scaler        Scaler // interface
-	// fetcher       *MetricFetcher // interface
-	ignoreList []string
+	scaler        Scaler        // interface
+	fetcher       MetricFetcher // interface
+	ignoreList    []string
 }
 type Config struct {
-	PrometheusURL  string
 	ScrapeInterval time.Duration
 	Namespace      string
 	ignoreList     []string
+	cfgMapName     string
 }
 type RevisionData struct {
 	name      string
+	podName   string
 	namespace string
 	svcName   string
-	metrics   map[string]float64
+	metrics   map[Metric]float64
 	gpuName   string
 	usingMig  bool
-	slo       float64
 }
 
 // TODO: add more resource
@@ -82,15 +81,15 @@ type NodeResources struct {
 	migSlices map[string]int
 }
 
-func NewAutoscaler(cfg Config, kubeClient *kubernetes.Clientset, exporter *Exporter, knativeHelper *KnativeHelper, scaler Scaler) *Autoscaler {
+func NewAutoscaler(cfg Config, kubeClient *kubernetes.Clientset, exporter *Exporter, knativeHelper *KnativeHelper, scaler Scaler, fetcher MetricFetcher) *Autoscaler {
 	return &Autoscaler{
 		config:        cfg,
 		kubeClient:    kubeClient,
 		exporter:      exporter,
 		knativeHelper: knativeHelper,
 		scaler:        scaler,
-		// fetcher:       fetcher,
-		ignoreList: cfg.ignoreList,
+		fetcher:       fetcher,
+		ignoreList:    cfg.ignoreList,
 	}
 }
 
@@ -127,22 +126,17 @@ func getCurrentGPU(pod v1.Pod) (string, bool, error) {
 func (a *Autoscaler) getRevisionData(pod v1.Pod) (RevisionData, error) {
 	gpuName, usingMig, err := getCurrentGPU(pod)
 	if err != nil {
-		return RevisionData{}, fmt.Errorf("Error getting GPU for pod %s: %v", pod.Name, err)
-	}
-
-	slo, err := strconv.ParseFloat(pod.Labels["slo"], 64)
-	if err != nil {
-		return RevisionData{}, fmt.Errorf("failed to parse SLO for pod %s: %w", pod.Name, err)
+		return RevisionData{}, fmt.Errorf("error getting GPU for pod %s: %v", pod.Name, err)
 	}
 
 	return RevisionData{
 		name:      pod.Labels["serving.knative.dev/revision"],
+		podName:   pod.Name,
 		namespace: pod.Namespace,
 		svcName:   pod.Labels["serving.knative.dev/service"],
 		metrics:   nil,
 		gpuName:   gpuName,
 		usingMig:  usingMig,
-		slo:       slo,
 	}, nil
 }
 
@@ -152,7 +146,7 @@ func (a *Autoscaler) ProcessService(serviceName string) error {
 		LabelSelector: fmt.Sprintf("serving.knative.dev/service=%s", serviceName),
 	})
 	if err != nil {
-		return fmt.Errorf("Failed to list pods for service %s: %w", serviceName, err)
+		return fmt.Errorf("failed to list pods for service %s: %w", serviceName, err)
 	}
 
 	for _, pod := range pods.Items {
@@ -193,16 +187,13 @@ func (a *Autoscaler) processPod(serviceName string, pod v1.Pod) error {
 
 	// Step 4: Obtain metrics from Prometheus
 	// TODO finish fetch metrics
-	// metrics, err := a.fetcher.FetchPodMetrics(pod.Name)
-	// if err != nil {
-	// a.sendEvent(revisionData.name, int(NotScaling), revisionData.gpuName)
-	// 	return fmt.Errorf("failed to fetch metrics for pod %s: %w", pod.Name, err)
-	// }
-	revisionData.metrics = (map[string]float64{
-		TGI_REQUEST_METRIC: 1,
-	})
+	revisionData.metrics, err = a.fetcher.FetchPodMetrics(pod.Name)
+	if err != nil {
+		return fmt.Errorf("failed to fetch metrics for pod %s: %w", pod.Name, err)
+	}
 
 	// Step 5: Decide scaling
+	// TODO: Partition Scaler and ScaleDecider
 	scaleDecision, resourceRequirements := a.scaler.DecideScale(revisionData, nodeResources)
 	if scaleDecision != NotScaling {
 		if err := a.scaler.ApplyScale(scaleDecision, revisionData, resourceRequirements, a.knativeHelper); err != nil {
@@ -277,17 +268,23 @@ func parseConfig() (Config, error) {
 		namespace = defaultNamespace
 	}
 
+	// TODO: add ignore list to config map
 	var ignoreList []string
 	ignoreList_ := os.Getenv("IGNORE_LIST")
 	if ignoreList_ != "" {
 		ignoreList = strings.Split(ignoreList_, ",")
 	}
 
+	cfgMapName := os.Getenv("CONFIG_MAP_NAME")
+	if cfgMapName == "" {
+		cfgMapName = "autoscaler-config"
+	}
+
 	return Config{
-		PrometheusURL:  "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/query",
 		ScrapeInterval: interval,
 		Namespace:      namespace,
 		ignoreList:     ignoreList,
+		cfgMapName:     cfgMapName,
 	}, nil
 }
 
@@ -310,8 +307,8 @@ func main() {
 	exporter := NewExporter(defaultExportInterval)
 	knativeHelper := NewKnativeHelper(autoscalerCfg.Namespace)
 	scaler := NewSimpleScaler()
-	// fetcher := NewSimpleFetcher()
-	autoscaler := NewAutoscaler(autoscalerCfg, kubeClient, exporter, knativeHelper, scaler)
+	fetcher := NewSimpleFetcher(autoscalerCfg, kubeClient)
+	autoscaler := NewAutoscaler(autoscalerCfg, kubeClient, exporter, knativeHelper, scaler, fetcher)
 
 	autoscaler.exporter.StartExporter()
 

@@ -49,6 +49,7 @@ kind: ServiceMonitor
 metadata:
   labels:
     app: autoscaler
+    release: prometheus
   name: autoscaler-servicemonitor
   namespace: default
 spec:
@@ -111,3 +112,18 @@ kind: ServiceAccount
 metadata:
   name: autoscaler-sa
   namespace: default
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: autoscaler-config
+  namespace: default
+  labels:
+    app: autoscaler
+data:
+  metrics: |
+    - name: tgi_request_metric
+      query: increase(tgi_request_mean_time_per_token_duration_sum{pod="%s"}[1m])/increase(tgi_request_mean_time_per_token_duration_count{pod="%s"}[1m])
+      slo: 0.5
+      scaleDownFactor: 0.5
+      scaleUpFactor: 1.5
