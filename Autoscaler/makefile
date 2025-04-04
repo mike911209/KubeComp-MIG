@@ -1,13 +1,12 @@
 # Variables
 IMAGE_NAME=autoscaler
 IMAGE_TAG=local
+REGISTRY=ghcr.io/mike911209
 KUBE_CONFIG=configuration.yaml
 
 # Build Docker image
-set:
-	eval $(minikube docker-env)
 build:
-	docker build -t ghcr.io/mike911209/$(IMAGE_NAME):$(IMAGE_TAG) --push .
+	docker build -t $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) --push .
 
 # Apply Kubernetes configuration
 deploy:
