@@ -29,21 +29,22 @@ const (
 
 type Scaler interface {
 	// TODO: change decide scale to interface, abstract the implementation (ScaleDecider)
-	DecideScale(revisionData RevisionData, nodeResources NodeResources) (ScaleDecision, v1.ResourceRequirements)
-	checkScaleDown(revisionData RevisionData, nodeResources NodeResources) (ScaleDecision, v1.ResourceRequirements)
-	checkScaleUp(revisionData RevisionData, nodeResources NodeResources) (ScaleDecision, v1.ResourceRequirements)
-	checkScaleIn(revisionData RevisionData, nodeResources NodeResources) (ScaleDecision, v1.ResourceRequirements)
-	checkScaleOut(revisionData RevisionData, nodeResources NodeResources) (ScaleDecision, v1.ResourceRequirements)
+	DecideScale(revisionData RevisionData) (ScaleDecision, v1.ResourceRequirements)
+	checkScaleDown(revisionData RevisionData) (ScaleDecision, v1.ResourceRequirements)
+	checkScaleUp(revisionData RevisionData) (ScaleDecision, v1.ResourceRequirements)
+	checkScaleIn(revisionData RevisionData) (ScaleDecision, v1.ResourceRequirements)
+	checkScaleOut(revisionData RevisionData) (ScaleDecision, v1.ResourceRequirements)
 	ApplyScale(scaleDecision ScaleDecision, revisionData RevisionData, newResources v1.ResourceRequirements, khelper *KnativeHelper) error
 	updateServiceTraffic(scaleDecision ScaleDecision, revisionData RevisionData, khelper *KnativeHelper) error
 }
 
 type SimpleScaler struct {
-	DefaultCPU    string
-	DefaultMemory string
+	DefaultCPU      string
+	DefaultMemory   string
+	gpuTierRegistry *GpuTierRegistry
 }
 
-func NewSimpleScaler() *SimpleScaler {
+func NewSimpleScaler(gpuTierRegistry *GpuTierRegistry) *SimpleScaler {
 	// TODO: change cpu and memory also to config map
 	defaultCPU := os.Getenv("DEFAULT_CPU")
 	if defaultCPU == "" {
@@ -56,13 +57,14 @@ func NewSimpleScaler() *SimpleScaler {
 	}
 
 	return &SimpleScaler{
-		DefaultCPU:    defaultCPU,
-		DefaultMemory: defaultMemory,
+		DefaultCPU:      defaultCPU,
+		DefaultMemory:   defaultMemory,
+		gpuTierRegistry: gpuTierRegistry,
 	}
 }
 
 // Decide the Scaling decision based on the metrics
-func (s *SimpleScaler) DecideScale(revisionData RevisionData, nodeResources NodeResources) (ScaleDecision, v1.ResourceRequirements) {
+func (s *SimpleScaler) DecideScale(revisionData RevisionData) (ScaleDecision, v1.ResourceRequirements) {
 	// TODO: generalize metric checking, not just hardcode TGI_REQUEST_METRIC (maybe multiple metrics)
 
 	log.Printf("Checking scaling decision - Pod: %s, Metric: %v", revisionData.podName, revisionData.metrics)
@@ -81,9 +83,9 @@ func (s *SimpleScaler) DecideScale(revisionData RevisionData, nodeResources Node
 
 	switch scaleDecision {
 	case ScalingDown:
-		return s.checkScaleDown(revisionData, nodeResources)
+		return s.checkScaleDown(revisionData)
 	case ScalingUp:
-		return s.checkScaleUp(revisionData, nodeResources)
+		return s.checkScaleUp(revisionData)
 	default:
 		log.Println("No scaling needed")
 		return NotScaling, v1.ResourceRequirements{}
@@ -91,90 +93,86 @@ func (s *SimpleScaler) DecideScale(revisionData RevisionData, nodeResources Node
 }
 
 // check if scaling decsion can be applied and generate resource requirements
-func (s *SimpleScaler) checkScaleDown(revisionData RevisionData, nodeResources NodeResources) (ScaleDecision, v1.ResourceRequirements) {
+func (s *SimpleScaler) checkScaleDown(revisionData RevisionData) (ScaleDecision, v1.ResourceRequirements) {
 	// TODO: support MPS
-	if revisionData.gpuName == migConfigs[0] {
-		log.Printf("Pod %s is already using the smallest resource tier", revisionData.name)
+	prevTier, err := s.gpuTierRegistry.GetPrevAvailTier(revisionData.gpuResource)
+	if err != nil {
+		log.Printf("Error getting previous available tier for pod %s: %v", revisionData.name, err)
 		return NotScaling, v1.ResourceRequirements{}
 	}
 
-	// TODO: Scale down to the next smaller resource tier (maybe using for loop)
-	nextTier := migConfigs[migConfigsIdx[revisionData.gpuName]-1]
-	if available := nodeResources.migSlices[nextTier]; available > 0 {
-		resourceRequirements := v1.ResourceRequirements{
-			Limits: v1.ResourceList{
-				v1.ResourceCPU:            resource.MustParse(s.DefaultCPU),
-				v1.ResourceMemory:         resource.MustParse(s.DefaultMemory),
-				v1.ResourceName(nextTier): resource.MustParse("1"),
-			},
-			Requests: v1.ResourceList{
-				v1.ResourceCPU:            resource.MustParse(s.DefaultCPU),
-				v1.ResourceMemory:         resource.MustParse(s.DefaultMemory),
-				v1.ResourceName(nextTier): resource.MustParse("1"),
-			},
-		}
-		log.Printf("Scaling down pod %s to %s", revisionData.name, nextTier)
-		return ScalingDown, resourceRequirements
+	resourceRequirements := v1.ResourceRequirements{
+		Limits: v1.ResourceList{
+			v1.ResourceCPU:                    resource.MustParse(s.DefaultCPU),
+			v1.ResourceMemory:                 resource.MustParse(s.DefaultMemory),
+			v1.ResourceName(prevTier.gpuName): resource.MustParse("1"),
+		},
+		Requests: v1.ResourceList{
+			v1.ResourceCPU:                    resource.MustParse(s.DefaultCPU),
+			v1.ResourceMemory:                 resource.MustParse(s.DefaultMemory),
+			v1.ResourceName(prevTier.gpuName): resource.MustParse("1"),
+		},
 	}
 
-	log.Printf("No available resources for scaling down pod %s to %s", revisionData.name, nextTier)
-	return NotScaling, v1.ResourceRequirements{}
+	log.Printf("Scaling down pod %s to %s", revisionData.name, prevTier.gpuName)
+
+	return ScalingDown, resourceRequirements
 }
 
 // check if scaling decsion can be applied and generate resource requirements
-func (s *SimpleScaler) checkScaleUp(revisionData RevisionData, nodeResources NodeResources) (ScaleDecision, v1.ResourceRequirements) {
-	if revisionData.gpuName == migConfigs[len(migConfigs)-1] {
-		log.Printf("Pod %s is already using the largest resource tier", revisionData.name)
+func (s *SimpleScaler) checkScaleUp(revisionData RevisionData) (ScaleDecision, v1.ResourceRequirements) {
+	nextTier, err := s.gpuTierRegistry.GetNextAvailTier(revisionData.gpuResource)
+	if err != nil {
+		log.Printf("Error getting next available tier for pod %s: %v", revisionData.name, err)
 		return NotScaling, v1.ResourceRequirements{}
 	}
 
-	nextTier := migConfigs[migConfigsIdx[revisionData.gpuName]+1]
-	if available := nodeResources.migSlices[nextTier]; available > 0 {
-		resourceRequirements := v1.ResourceRequirements{
-			Limits: v1.ResourceList{
-				v1.ResourceCPU:            resource.MustParse(s.DefaultCPU),
-				v1.ResourceMemory:         resource.MustParse(s.DefaultMemory),
-				v1.ResourceName(nextTier): resource.MustParse("1"),
-			},
-			Requests: v1.ResourceList{
-				v1.ResourceCPU:            resource.MustParse(s.DefaultCPU),
-				v1.ResourceMemory:         resource.MustParse(s.DefaultMemory),
-				v1.ResourceName(nextTier): resource.MustParse("1"),
-			},
-		}
-		log.Printf("Scaling up pod %s to %s", revisionData.name, nextTier)
-		return ScalingUp, resourceRequirements
+	resourceRequirements := v1.ResourceRequirements{
+		Limits: v1.ResourceList{
+			v1.ResourceCPU:                    resource.MustParse(s.DefaultCPU),
+			v1.ResourceMemory:                 resource.MustParse(s.DefaultMemory),
+			v1.ResourceName(nextTier.gpuName): resource.MustParse("1"),
+		},
+		Requests: v1.ResourceList{
+			v1.ResourceCPU:                    resource.MustParse(s.DefaultCPU),
+			v1.ResourceMemory:                 resource.MustParse(s.DefaultMemory),
+			v1.ResourceName(nextTier.gpuName): resource.MustParse("1"),
+		},
 	}
 
-	log.Printf("No available resources for scaling up pod %s to %s", revisionData.name, nextTier)
-	return NotScaling, v1.ResourceRequirements{}
+	log.Printf("Scaling up pod %s to %s", revisionData.name, nextTier.gpuName)
+
+	return ScalingUp, resourceRequirements
 }
 
-func (s *SimpleScaler) checkScaleIn(revisionData RevisionData, nodeResources NodeResources) (ScaleDecision, v1.ResourceRequirements) {
+func (s *SimpleScaler) checkScaleIn(revisionData RevisionData) (ScaleDecision, v1.ResourceRequirements) {
 	return ScalingIn, v1.ResourceRequirements{}
 }
 
-func (s *SimpleScaler) checkScaleOut(revisionData RevisionData, nodeResources NodeResources) (ScaleDecision, v1.ResourceRequirements) {
+func (s *SimpleScaler) checkScaleOut(revisionData RevisionData) (ScaleDecision, v1.ResourceRequirements) {
 	// TODO: not only scale to same resource, maybe consider using bigger or smaller
-	if available := nodeResources.migSlices[revisionData.gpuName]; available > 0 {
-		resourceRequirements := v1.ResourceRequirements{
-			Limits: v1.ResourceList{
-				v1.ResourceCPU:                        resource.MustParse(s.DefaultCPU),
-				v1.ResourceMemory:                     resource.MustParse(s.DefaultMemory),
-				v1.ResourceName(revisionData.gpuName): resource.MustParse("1"),
-			},
-			Requests: v1.ResourceList{
-				v1.ResourceCPU:                        resource.MustParse(s.DefaultCPU),
-				v1.ResourceMemory:                     resource.MustParse(s.DefaultMemory),
-				v1.ResourceName(revisionData.gpuName): resource.MustParse("1"),
-			},
-		}
-		log.Printf("Scaling out pod %s to %s", revisionData.name, revisionData.gpuName)
-		return ScalingOut, resourceRequirements
+	sameTier, err := s.gpuTierRegistry.GetSameAvailTier(revisionData.gpuResource)
+	if err != nil {
+		log.Printf("Error getting same available tier for pod %s: %v", revisionData.name, err)
+		return NotScaling, v1.ResourceRequirements{}
 	}
 
-	log.Printf("No available resources for scaling out pod %s to %s", revisionData.name, revisionData.gpuName)
-	return NotScaling, v1.ResourceRequirements{}
+	resourceRequirements := v1.ResourceRequirements{
+		Limits: v1.ResourceList{
+			v1.ResourceCPU:                    resource.MustParse(s.DefaultCPU),
+			v1.ResourceMemory:                 resource.MustParse(s.DefaultMemory),
+			v1.ResourceName(sameTier.gpuName): resource.MustParse("1"),
+		},
+		Requests: v1.ResourceList{
+			v1.ResourceCPU:                    resource.MustParse(s.DefaultCPU),
+			v1.ResourceMemory:                 resource.MustParse(s.DefaultMemory),
+			v1.ResourceName(sameTier.gpuName): resource.MustParse("1"),
+		},
+	}
+
+	log.Printf("Scaling out pod %s to %s", revisionData.name, sameTier.gpuName)
+
+	return ScalingOut, resourceRequirements
 }
 
 func incrementRevision(revision string) (string, error) {
@@ -228,7 +226,7 @@ func (s *SimpleScaler) ApplyScale(scaleDecision ScaleDecision, revisionData Revi
 			return fmt.Errorf("error updating service %s: %v", newService.Name, err)
 		}
 
-		err = khelper.WaitService(context.TODO(), newService, 30*time.Second) // TODO: timeout should be configurable
+		err = khelper.WaitService(context.TODO(), newService, 600*time.Second) // TODO: timeout should be configurable
 		if err != nil {
 			return fmt.Errorf("error waiting for service %s: %v", newService.Name, err)
 		}
@@ -240,7 +238,7 @@ func (s *SimpleScaler) ApplyScale(scaleDecision ScaleDecision, revisionData Revi
 		return fmt.Errorf("error updating service traffic: %v", err)
 	}
 
-	// step 4: post scaling actions
+	// step 3: post scaling actions
 	switch scaleDecision {
 	case ScalingUp, ScalingDown, ScalingIn:
 		khelper.DeleteRevision(context.TODO(), revisionData.name, 5*time.Minute)

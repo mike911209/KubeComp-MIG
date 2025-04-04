@@ -51,13 +51,14 @@ var (
 )
 
 type Autoscaler struct {
-	config        Config
-	kubeClient    *kubernetes.Clientset
-	exporter      *Exporter
-	knativeHelper *KnativeHelper
-	scaler        Scaler        // interface
-	fetcher       MetricFetcher // interface
-	ignoreList    []string
+	config          Config
+	kubeClient      *kubernetes.Clientset
+	exporter        *Exporter
+	knativeHelper   *KnativeHelper
+	scaler          Scaler        // interface
+	fetcher         MetricFetcher // interface
+	gpuTierRegistry *GpuTierRegistry
+	ignoreList      []string
 }
 type Config struct {
 	ScrapeInterval time.Duration
@@ -66,77 +67,48 @@ type Config struct {
 	cfgMapName     string
 }
 type RevisionData struct {
-	name      string
-	podName   string
-	namespace string
-	svcName   string
-	metrics   map[Metric]float64
-	gpuName   string
-	usingMig  bool
+	name        string
+	podName     string
+	namespace   string
+	svcName     string
+	metrics     map[Metric]float64
+	gpuResource GpuResource
 }
 
-// TODO: add more resource
-type NodeResources struct {
-	NodeName  string
-	migSlices map[string]int
-}
-
-func NewAutoscaler(cfg Config, kubeClient *kubernetes.Clientset, exporter *Exporter, knativeHelper *KnativeHelper, scaler Scaler, fetcher MetricFetcher) *Autoscaler {
+func NewAutoscaler(cfg Config, kubeClient *kubernetes.Clientset, exporter *Exporter, knativeHelper *KnativeHelper, scaler Scaler, fetcher MetricFetcher, gpuTierRegistry *GpuTierRegistry) *Autoscaler {
 	return &Autoscaler{
-		config:        cfg,
-		kubeClient:    kubeClient,
-		exporter:      exporter,
-		knativeHelper: knativeHelper,
-		scaler:        scaler,
-		fetcher:       fetcher,
-		ignoreList:    cfg.ignoreList,
+		config:          cfg,
+		kubeClient:      kubeClient,
+		exporter:        exporter,
+		knativeHelper:   knativeHelper,
+		scaler:          scaler,
+		fetcher:         fetcher,
+		gpuTierRegistry: gpuTierRegistry,
+		ignoreList:      cfg.ignoreList,
 	}
 }
 
-func (a *Autoscaler) getNodeResources(nodeName string) (NodeResources, error) {
-	// TODO: add MPS and another GPU (resources) support
-	node, err := a.kubeClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
-	if err != nil {
-		return NodeResources{}, fmt.Errorf("failed to get node %s: %w", nodeName, err)
-	}
-
-	migSlices := make(map[string]int)
-	for _, migConfig := range migConfigs {
-		rQuant := node.Status.Allocatable[v1.ResourceName(migConfig)]
-		migSlices[migConfig] = int(rQuant.Value())
-	}
-
-	return NodeResources{
-		NodeName:  nodeName,
-		migSlices: migSlices,
-	}, nil
-}
-
-func getCurrentGPU(pod v1.Pod) (string, bool, error) {
-	// TODO: add MPS support
-	for _, migConfig := range migConfigs {
-		rQuant := pod.Spec.Containers[0].Resources.Requests[v1.ResourceName(migConfig)]
-		if rQuant.Value() > 0 {
-			return migConfig, true, nil
-		}
-	}
-	return "", false, fmt.Errorf("pod %s is not using any GPU", pod.Name)
-}
-
+// TODO: maybe change to return reference
 func (a *Autoscaler) getRevisionData(pod v1.Pod) (RevisionData, error) {
-	gpuName, usingMig, err := getCurrentGPU(pod)
-	if err != nil {
-		return RevisionData{}, fmt.Errorf("error getting GPU for pod %s: %v", pod.Name, err)
+	var gpuResource GpuResource
+	var err error = nil
+	for rName := range pod.Spec.Containers[0].Resources.Requests {
+		if strings.Contains(rName.String(), "nvidia.com") {
+			gpuResource, err = parseGpuResource(rName.String())
+			if err != nil {
+				return RevisionData{}, fmt.Errorf("error parsing GPU resource for pod %s: %v", pod.Name, err)
+			}
+			break
+		}
 	}
 
 	return RevisionData{
-		name:      pod.Labels["serving.knative.dev/revision"],
-		podName:   pod.Name,
-		namespace: pod.Namespace,
-		svcName:   pod.Labels["serving.knative.dev/service"],
-		metrics:   nil,
-		gpuName:   gpuName,
-		usingMig:  usingMig,
+		name:        pod.Labels["serving.knative.dev/revision"],
+		podName:     pod.Name,
+		namespace:   pod.Namespace,
+		svcName:     pod.Labels["serving.knative.dev/service"],
+		metrics:     nil,
+		gpuResource: gpuResource,
 	}, nil
 }
 
@@ -150,7 +122,7 @@ func (a *Autoscaler) ProcessService(serviceName string) error {
 	}
 
 	for _, pod := range pods.Items {
-		if err = a.processPod(serviceName, pod); err != nil {
+		if err = a.processPod(pod); err != nil {
 			log.Printf("Error processing pods %s: %v", pod.Name, err)
 			continue
 		}
@@ -158,7 +130,7 @@ func (a *Autoscaler) ProcessService(serviceName string) error {
 	return nil
 }
 
-func (a *Autoscaler) processPod(serviceName string, pod v1.Pod) error {
+func (a *Autoscaler) processPod(pod v1.Pod) error {
 	// TODO: label pod for scaling
 	// Step 1: get revision data
 	revisionData, err := a.getRevisionData(pod)
@@ -179,22 +151,15 @@ func (a *Autoscaler) processPod(serviceName string, pod v1.Pod) error {
 		return fmt.Errorf("pod %s is not running", pod.Name)
 	}
 
-	// Step 3: Get node resources
-	nodeResources, err := a.getNodeResources(pod.Spec.NodeName)
-	if err != nil {
-		return fmt.Errorf("failed to get node resources for pod %s: %w", pod.Name, err)
-	}
-
-	// Step 4: Obtain metrics from Prometheus
-	// TODO finish fetch metrics
+	// Step 3: Obtain metrics from Prometheus
 	revisionData.metrics, err = a.fetcher.FetchPodMetrics(pod)
 	if err != nil {
 		return fmt.Errorf("failed to fetch metrics for pod %s: %w", pod.Name, err)
 	}
 
-	// Step 5: Decide scaling
+	// Step 4: Decide scaling
 	// TODO: Partition Scaler and ScaleDecider
-	scaleDecision, resourceRequirements := a.scaler.DecideScale(revisionData, nodeResources)
+	scaleDecision, resourceRequirements := a.scaler.DecideScale(revisionData)
 	if scaleDecision != NotScaling {
 		if err := a.scaler.ApplyScale(scaleDecision, revisionData, resourceRequirements, a.knativeHelper); err != nil {
 			return fmt.Errorf("failed to apply scaling decision for pod %s: %w", pod.Name, err)
@@ -306,9 +271,10 @@ func main() {
 
 	exporter := NewExporter(defaultExportInterval)
 	knativeHelper := NewKnativeHelper(autoscalerCfg.Namespace)
-	scaler := NewSimpleScaler()
+	gpuTierRegistry := NewGpuTierRegistry(kubeClient)
+	scaler := NewSimpleScaler(gpuTierRegistry)
 	fetcher := NewSimpleFetcher(autoscalerCfg, kubeClient)
-	autoscaler := NewAutoscaler(autoscalerCfg, kubeClient, exporter, knativeHelper, scaler, fetcher)
+	autoscaler := NewAutoscaler(autoscalerCfg, kubeClient, exporter, knativeHelper, scaler, fetcher, gpuTierRegistry)
 
 	autoscaler.exporter.StartExporter()
 

@@ -60,7 +60,7 @@ func (k *KnativeHelper) WaitRevision(ctx context.Context, revision *kv1.Revision
 			return nil
 		}
 		if time.Since(timeStart) > timeout {
-			return fmt.Errorf("Timeout waiting for revision %s to be ready", revision.Name)
+			return fmt.Errorf("timeout waiting for revision %s to be ready", revision.Name)
 		}
 	}
 }
@@ -93,7 +93,7 @@ func (k *KnativeHelper) WaitService(ctx context.Context, oldService *kv1.Service
 			return nil
 		}
 		if time.Since(timeStart) > timeout {
-			return fmt.Errorf("Timeout waiting for service %s to be ready", service.Name)
+			return fmt.Errorf("timeout waiting for service %s to be ready", service.Name)
 		}
 	}
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,9 +17,8 @@ type Exporter struct {
 }
 
 type Event struct {
-	revisionName string
+	revisionData RevisionData
 	scalingType  ScaleDecision // NotScaling, ScalingDown, ...
-	resourceName string
 }
 
 // NewExporter creates a new Exporter instance
@@ -57,9 +55,9 @@ func (e *Exporter) StartExporter() {
 				<-ticker.C
 				switch event := <-e.eventsChan; event.scalingType {
 				case NotScaling, ScalingOut:
-					e.gpuResource.With(prometheus.Labels{"revision": event.revisionName}).Set(e.resourceToCPU(event.resourceName))
+					e.gpuResource.With(prometheus.Labels{"revision": event.revisionData.name}).Set(event.revisionData.gpuResource.cpuSize)
 				case ScalingIn, ScalingUp, ScalingDown:
-					flag := e.gpuResource.Delete(prometheus.Labels{"revision": event.revisionName})
+					flag := e.gpuResource.Delete(prometheus.Labels{"revision": event.revisionData.name})
 					if !flag {
 						log.Printf("Error deleting metric")
 					}
@@ -75,19 +73,9 @@ func (e *Exporter) StartExporter() {
 	}()
 }
 
-// TODO: change implementation (maybe use regex), and use a better function name
-func (e *Exporter) resourceToCPU(resource string) float64 {
-	if resource == "" {
-		return 0
-	}
-	cpu, _ := strconv.ParseFloat(resource[15:16], 64)
-	return cpu
-}
-
 func (e *Exporter) SendScalingEvent(revisionData RevisionData, scalingType ScaleDecision) {
 	e.eventsChan <- Event{
-		revisionName: revisionData.name,
-		resourceName: revisionData.gpuName,
+		revisionData: revisionData,
 		scalingType:  scalingType,
 	}
 }
